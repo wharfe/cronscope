@@ -45,4 +45,13 @@ describe('github-actions connector', () => {
     expect(jobs).toHaveLength(1);
     expect(jobs[0].location).toBe('proj/.github/workflows/ci.yml');
   });
+
+  it('excludes deeply-nested submodule workflows but keeps org/repo depth', async () => {
+    const c = ctx({
+      '/home/u/dev/kiku/native/deepfilter-src/.github/workflows/x.yml': WORKFLOW, // depth 3 -> excluded
+      '/home/u/dev/org/repo/.github/workflows/ci.yml': WORKFLOW,                  // depth 2 -> kept
+    });
+    const jobs = await githubActionsConnector.discover(c);
+    expect(jobs.map((j) => j.location)).toEqual(['org/repo/.github/workflows/ci.yml']);
+  });
 });
