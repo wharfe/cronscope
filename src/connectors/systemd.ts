@@ -21,6 +21,13 @@ function mapStatus(result: string | undefined, lastAt: string | undefined): RunS
   return result === 'success' ? 'success' : 'failure';
 }
 
+function parseTimerUnits(stdout: string): string[] {
+  return stdout
+    .split('\n')
+    .map((line) => line.trim().split(/\s+/, 1)[0])
+    .filter((unit) => unit?.endsWith('.timer'));
+}
+
 export const systemdConnector: Connector = {
   id: 'systemd',
   tier: 0,
@@ -30,13 +37,11 @@ export const systemdConnector: Connector = {
     return { state: 'available' };
   },
   async discover(ctx) {
-    const list = await ctx.run(['systemctl', '--user', 'list-timers', '--all', '--no-legend', '--output=json']);
+    const list = await ctx.run(['systemctl', '--user', 'list-units', '--type=timer', '--all', '--no-legend', '--plain']);
     if (list.code !== 0) return [];
-    let timers: Array<{ unit: string }>;
-    try { timers = JSON.parse(list.stdout); } catch { return []; }
+    const timers = parseTimerUnits(list.stdout);
     const jobs: Job[] = [];
-    for (const t of timers) {
-      const timerUnit = t.unit;
+    for (const timerUnit of timers) {
       const tShow = await ctx.run(['systemctl', '--user', 'show', timerUnit, '--property=Unit,NextElapseUSecRealtime']);
       const tp = parseProps(tShow.stdout);
       const service = tp['Unit'];

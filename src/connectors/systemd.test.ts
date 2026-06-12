@@ -22,8 +22,8 @@ describe('systemd connector', () => {
   it('parses a timer + service into a job with last-run status', async () => {
     const ctx = makeCtx({
       'systemctl --user show --property=Version': ok('Version=255'),
-      'systemctl --user list-timers --all --no-legend --output=json':
-        ok(JSON.stringify([{ unit: 'etl.timer' }])),
+      'systemctl --user list-units --type=timer --all --no-legend --plain':
+        ok('etl.timer loaded active waiting Run ETL\n'),
       'systemctl --user show etl.timer --property=Unit,NextElapseUSecRealtime':
         ok('Unit=etl.service\nNextElapseUSecRealtime=Fri 2026-06-12 12:00:00 UTC'),
       'systemctl --user show etl.service --property=Result,ExecMainStatus,ExecMainExitTimestamp,ActiveEnterTimestamp':
@@ -41,8 +41,8 @@ describe('systemd connector', () => {
   it('maps Result=failed to failure status', async () => {
     const ctx = makeCtx({
       'systemctl --user show --property=Version': ok('Version=255'),
-      'systemctl --user list-timers --all --no-legend --output=json':
-        ok(JSON.stringify([{ unit: 'etl.timer' }])),
+      'systemctl --user list-units --type=timer --all --no-legend --plain':
+        ok('etl.timer loaded active waiting Run ETL\n'),
       'systemctl --user show etl.timer --property=Unit,NextElapseUSecRealtime':
         ok('Unit=etl.service\nNextElapseUSecRealtime=Fri 2026-06-12 12:00:00 UTC'),
       'systemctl --user show etl.service --property=Result,ExecMainStatus,ExecMainExitTimestamp,ActiveEnterTimestamp':
