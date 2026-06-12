@@ -35,4 +35,14 @@ describe('github-actions connector', () => {
     const c = ctx({ '/home/u/dev/proj/.github/workflows/ci.yml': 'name: ci\non: [push]\njobs: {}\n' });
     expect(await githubActionsConnector.discover(c)).toHaveLength(0);
   });
+
+  it('excludes workflows under vendored dependency directories', async () => {
+    const c = ctx({
+      '/home/u/dev/proj/_deps/json-src/.github/workflows/x.yml': WORKFLOW,
+      '/home/u/dev/proj/.github/workflows/ci.yml': WORKFLOW,
+    });
+    const jobs = await githubActionsConnector.discover(c);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].location).toBe('proj/.github/workflows/ci.yml');
+  });
 });

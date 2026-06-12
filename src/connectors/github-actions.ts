@@ -8,6 +8,21 @@ function relPath(ctx: Ctx, file: string): string {
   return file;
 }
 
+const VENDORED_PATH_SEGMENTS = [
+  'node_modules',
+  '_deps',
+  '_build',
+  'vendor',
+  'dist',
+  'build',
+  'target',
+  '.git',
+];
+
+function isVendoredWorkflowPath(file: string): boolean {
+  return VENDORED_PATH_SEGMENTS.some((segment) => file.includes(`/${segment}/`));
+}
+
 export const githubActionsConnector: Connector = {
   id: 'github-actions',
   tier: 0,
@@ -20,6 +35,7 @@ export const githubActionsConnector: Connector = {
     for (const root of ctx.scanRoots) {
       const files = await ctx.glob('**/.github/workflows/*.{yml,yaml}', root);
       for (const file of files) {
+        if (isVendoredWorkflowPath(file)) continue;
         let doc: any;
         try { doc = parse(await ctx.readFile(file)); } catch { continue; }
         const schedules = doc?.on?.schedule;
