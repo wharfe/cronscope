@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { systemdConnector } from './systemd.js';
+import { systemdConnector, parseSystemdTime } from './systemd.js';
 import type { Ctx, RunResult } from '../types.js';
 
 function makeCtx(map: Record<string, RunResult>): Ctx {
@@ -51,5 +51,21 @@ describe('systemd connector', () => {
     const jobs = await systemdConnector.discover(ctx);
     expect(jobs[0].lastRun?.status).toBe('failure');
     expect(jobs[0].lastRun?.exitCode).toBe(1);
+  });
+});
+
+describe('parseSystemdTime', () => {
+  it('parses a timezone-abbreviation timestamp (e.g. JST) systemd renders', () => {
+    // JS Date cannot parse "... JST" directly; the fallback reads the
+    // YYYY-MM-DD HH:MM:SS core as local time. Compare against the same
+    // local interpretation so the assertion is runner-timezone-independent.
+    const got = parseSystemdTime('Fri 2026-06-12 22:00:00 JST');
+    expect(got).toBe(new Date('2026-06-12T22:00:00').toISOString());
+  });
+
+  it('still parses UTC and returns undefined for empty', () => {
+    expect(parseSystemdTime('Fri 2026-06-12 12:00:00 UTC')).toBe('2026-06-12T12:00:00.000Z');
+    expect(parseSystemdTime('')).toBeUndefined();
+    expect(parseSystemdTime('n/a')).toBeUndefined();
   });
 });

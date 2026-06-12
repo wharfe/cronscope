@@ -9,10 +9,19 @@ function parseProps(stdout: string): Record<string, string> {
   return out;
 }
 
-function parseSystemdTime(v: string | undefined): string | undefined {
+export function parseSystemdTime(v: string | undefined): string | undefined {
   if (!v || v === 'n/a' || v === '') return undefined;
-  const d = new Date(v);
-  return isNaN(d.getTime()) ? undefined : d.toISOString();
+  // Direct parse handles ISO and tz tokens JS understands (UTC/GMT).
+  const direct = new Date(v);
+  if (!isNaN(direct.getTime())) return direct.toISOString();
+  // `systemctl show` renders timestamps like "Fri 2026-06-12 22:00:00 JST"
+  // with a timezone abbreviation that JS Date cannot parse. Extract the
+  // "YYYY-MM-DD HH:MM:SS" core and interpret it in the local timezone — the
+  // cronscope process shares the host TZ that systemd used to render it.
+  const m = v.match(/(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})/);
+  if (!m) return undefined;
+  const local = new Date(`${m[1]}T${m[2]}`);
+  return isNaN(local.getTime()) ? undefined : local.toISOString();
 }
 
 function mapStatus(result: string | undefined, lastAt: string | undefined): RunStatus {
