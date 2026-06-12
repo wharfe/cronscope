@@ -1,11 +1,30 @@
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
-import { glob } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { Ctx } from './types.js';
 
 const pexec = promisify(execFile);
+
+async function workflowFiles(cwd: string): Promise<string[]> {
+  const out: string[] = [];
+  async function walk(dir: string): Promise<void> {
+    let entries;
+    try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === 'node_modules' || entry.name === '.git') continue;
+        await walk(path);
+      } else if (entry.isFile() && (entry.name.endsWith('.yml') || entry.name.endsWith('.yaml')) && path.includes('/.github/workflows/')) {
+        out.push(path);
+      }
+    }
+  }
+  await walk(cwd);
+  return out.sort();
+}
 
 export function makeCtx(scanRoots: string[]): Ctx {
   return {
@@ -20,9 +39,8 @@ export function makeCtx(scanRoots: string[]): Ctx {
     },
     readFile: (p) => readFile(p, 'utf8'),
     async glob(pattern, cwd) {
-      const out: string[] = [];
-      for await (const entry of glob(pattern, { cwd })) out.push(`${cwd}/${entry}`);
-      return out;
+      if (pattern === '**/.github/workflows/*.{yml,yaml}') return workflowFiles(cwd);
+      return [];
     },
     fetch: globalThis.fetch,
     env: process.env,
