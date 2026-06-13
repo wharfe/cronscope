@@ -24,7 +24,8 @@ export function parseSystemdTime(v: string | undefined): string | undefined {
   return isNaN(local.getTime()) ? undefined : local.toISOString();
 }
 
-function mapStatus(result: string | undefined, lastAt: string | undefined): RunStatus {
+function mapStatus(result: string | undefined, lastAt: string | undefined, lastTriggerAt?: string): RunStatus {
+  if (!lastAt && lastTriggerAt) return 'unknown';
   if (!lastAt) return 'never';
   if (result === undefined) return 'unknown';
   return result === 'success' ? 'success' : 'failure';
@@ -51,18 +52,19 @@ export const systemdConnector: Connector = {
     const timers = parseTimerUnits(list.stdout);
     const jobs: Job[] = [];
     for (const timerUnit of timers) {
-      const tShow = await ctx.run(['systemctl', '--user', 'show', timerUnit, '--property=Unit,NextElapseUSecRealtime']);
+      const tShow = await ctx.run(['systemctl', '--user', 'show', timerUnit, '--property=Unit,NextElapseUSecRealtime,LastTriggerUSec']);
       const tp = parseProps(tShow.stdout);
       const service = tp['Unit'];
       const nextRun = parseSystemdTime(tp['NextElapseUSecRealtime']);
+      const lastTriggerAt = parseSystemdTime(tp['LastTriggerUSec']);
       let lastRun: LastRun;
       if (service) {
         const sShow = await ctx.run(['systemctl', '--user', 'show', service,
           '--property=Result,ExecMainStatus,ExecMainExitTimestamp,ActiveEnterTimestamp']);
         const sp = parseProps(sShow.stdout);
         const at = parseSystemdTime(sp['ExecMainExitTimestamp']) ?? parseSystemdTime(sp['ActiveEnterTimestamp']);
-        const exitCode = sp['ExecMainStatus'] !== undefined && sp['ExecMainStatus'] !== '' ? Number(sp['ExecMainStatus']) : undefined;
-        lastRun = { status: mapStatus(sp['Result'], at), at, exitCode, fetchedAt: ctx.now().toISOString() };
+        const exitCode = at && sp['ExecMainStatus'] !== undefined && sp['ExecMainStatus'] !== '' ? Number(sp['ExecMainStatus']) : undefined;
+        lastRun = { status: mapStatus(sp['Result'], at, lastTriggerAt), at: at ?? lastTriggerAt, exitCode, fetchedAt: ctx.now().toISOString() };
       } else {
         lastRun = { status: 'unknown', fetchedAt: ctx.now().toISOString() };
       }
