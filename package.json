@@ -1,12 +1,23 @@
 {
   "name": "cronscope",
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "description": "Cross-surface discovery and monitoring of scheduled jobs (crontab, systemd, GitHub Actions, Cloudflare) from one CLI.",
+  "keywords": ["cron", "crontab", "systemd", "scheduler", "monitoring", "github-actions", "cloudflare", "cli", "devops"],
+  "license": "MIT",
+  "author": "wharfe",
+  "homepage": "https://github.com/wharfe/cronscope#readme",
+  "repository": { "type": "git", "url": "git+https://github.com/wharfe/cronscope.git" },
+  "bugs": { "url": "https://github.com/wharfe/cronscope/issues" },
   "type": "module",
   "bin": { "cronscope": "dist/cli.js" },
+  "files": ["dist"],
+  "engines": { "node": ">=18" },
+  "publishConfig": { "access": "public" },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "dev": "tsx src/cli.ts"
+    "dev": "tsx src/cli.ts",
+    "prepublishOnly": "rm -rf dist && npm run build && npm test"
   },
   "dependencies": { "cron-parser": "^4.9.0", "yaml": "^2.5.0" },
   "devDependencies": {
