@@ -1,4 +1,4 @@
-export type JobSource = 'crontab' | 'systemd' | 'github-actions' | 'cloudflare';
+export type JobSource = 'crontab' | 'systemd' | 'github-actions' | 'cloudflare' | 'hermes';
 export type RunStatus = 'success' | 'failure' | 'unknown' | 'never';
 
 export type Availability =
@@ -14,7 +14,7 @@ export interface Job {
   name: string;
   schedule: {
     raw: string;
-    kind: 'cron' | 'systemd-oncalendar';
+    kind: 'cron' | 'systemd-oncalendar' | 'interval';
     timezone?: string;
     nextRun?: string;
     nextRunSource: 'source-authoritative' | 'computed' | 'unknown';
