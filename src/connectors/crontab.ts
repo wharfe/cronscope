@@ -1,6 +1,7 @@
-import type { Connector, Ctx, Job } from '../types.js';
+import type { Connector, Ctx, Job, LastRun } from '../types.js';
 import { cronNext } from '../core/schedule.js';
 import { redact } from '../redact.js';
+import { readCronFires, cronCommandLogKey } from '../core/cron-log.js';
 import { createHash } from 'node:crypto';
 
 const ENV_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*\s*=/;
@@ -25,6 +26,9 @@ export const crontabConnector: Connector = {
   },
   async discover(ctx) {
     const text = (await readCrontab(ctx)) ?? '';
+    const tz = ctx.timezone ?? 'UTC';
+    const fires = await readCronFires(ctx);
+    const nowIso = ctx.now().toISOString();
     const jobs: Job[] = [];
     for (const line of text.split('\n')) {
       const t = line.trim();
@@ -33,15 +37,19 @@ export const crontabConnector: Connector = {
       if (!m) continue;
       const schedule = m[1];
       const command = m[2];
-      const nextRun = cronNext(schedule, ctx.now(), 'UTC') ?? undefined;
+      const nextRun = cronNext(schedule, ctx.now(), tz) ?? undefined;
+      const at = fires.lastFireByCommand.get(cronCommandLogKey(command));
+      const lastRun: LastRun = fires.available
+        ? { status: 'unknown', at, observableSince: fires.observableSince, fetchedAt: nowIso }
+        : { status: 'unknown', fetchedAt: nowIso };
       jobs.push({
         id: id(command, schedule),
         source: 'crontab',
         name: redact(command).slice(0, 80),
-        schedule: { raw: schedule, kind: 'cron', nextRun, nextRunSource: nextRun ? 'computed' : 'unknown' },
+        schedule: { raw: schedule, kind: 'cron', timezone: tz, nextRun, nextRunSource: nextRun ? 'computed' : 'unknown' },
         target: redact(command),
         location: 'crontab',
-        lastRun: { status: 'unknown', fetchedAt: ctx.now().toISOString() },
+        lastRun,
       });
     }
     return jobs;
