@@ -81,4 +81,51 @@ describe('evaluate', () => {
     const r = evaluate(jobs, { now, bootAt, graceMinutes: 60 });
     expect(r.overdues).toHaveLength(0);
   });
+
+  // NOTE: these use a daily '0 8 * * *' schedule (prev slot 08:00 today = 2h5m before now,
+  // well beyond the 60-min grace) so the crontab gate/logic — not grace — decides the outcome.
+  // An hourly schedule would put prev at 10:00 (5m ago, inside grace) and mask the behavior.
+
+  it('flags a crontab job overdue when it fired before, not at the latest slot (in window)', () => {
+    // daily 08:00 missed today; last observed fire was yesterday 08:00; observableSince covers it
+    const jobs = [job({ id: 'co', source: 'crontab',
+      schedule: { raw: '0 8 * * *', kind: 'cron', nextRunSource: 'computed' },
+      lastRun: { status: 'unknown', at: '2026-06-11T08:00:00Z', observableSince: '2026-06-01T00:00:00Z', fetchedAt: 't' } })];
+    const r = evaluate(jobs, { now, bootAt, graceMinutes: 60 });
+    expect(r.overdues.map(j => j.id)).toEqual(['co']);
+  });
+
+  it('does NOT flag a crontab job with NO observed fire (just-added / %-mismatch)', () => {
+    const jobs = [job({ id: 'cn', source: 'crontab',
+      schedule: { raw: '0 8 * * *', kind: 'cron', nextRunSource: 'computed' },
+      lastRun: { status: 'unknown', observableSince: '2026-06-01T00:00:00Z', fetchedAt: 't' } })]; // no `at`
+    const r = evaluate(jobs, { now, bootAt, graceMinutes: 60 });
+    expect(r.overdues).toHaveLength(0);
+  });
+
+  it('does NOT flag a crontab job when logs were unreadable (no observableSince)', () => {
+    const jobs = [job({ id: 'cu', source: 'crontab',
+      schedule: { raw: '0 8 * * *', kind: 'cron', nextRunSource: 'computed' },
+      lastRun: { status: 'unknown', at: '2026-06-11T08:00:00Z', fetchedAt: 't' } })]; // no observableSince
+    const r = evaluate(jobs, { now, bootAt, graceMinutes: 60 });
+    expect(r.overdues).toHaveLength(0);
+  });
+
+  it('does NOT flag a crontab job whose missed slot predates the observable window', () => {
+    const jobs = [job({ id: 'cw', source: 'crontab',
+      schedule: { raw: '0 8 * * *', kind: 'cron', nextRunSource: 'computed' },
+      lastRun: { status: 'unknown', at: '2026-06-11T08:00:00Z', observableSince: '2026-06-12T09:00:00Z', fetchedAt: 't' } })];
+    // prev 08:00 today < observableSince 09:00 today -> can't vouch -> skip
+    const r = evaluate(jobs, { now, bootAt, graceMinutes: 60 });
+    expect(r.overdues).toHaveLength(0);
+  });
+
+  it('does NOT flag a crontab job that fired at/after its latest slot', () => {
+    const jobs = [job({ id: 'cf', source: 'crontab',
+      schedule: { raw: '0 8 * * *', kind: 'cron', nextRunSource: 'computed' },
+      lastRun: { status: 'unknown', at: '2026-06-12T08:00:30Z', observableSince: '2026-06-01T00:00:00Z', fetchedAt: 't' } })];
+    // prev 08:00 today, last fire 08:00:30 >= prev -> ran
+    const r = evaluate(jobs, { now, bootAt, graceMinutes: 60 });
+    expect(r.overdues).toHaveLength(0);
+  });
 });

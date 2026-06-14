@@ -4,7 +4,7 @@ import { cronPrev } from './schedule.js';
 export interface EvalCtx { now: Date; bootAt?: string; graceMinutes: number; }
 export interface EvalResult { failures: Job[]; overdues: Job[]; }
 
-const STATUS_BEARING = new Set(['systemd', 'cloudflare', 'hermes']);
+const STATUS_BEARING = new Set(['systemd', 'cloudflare', 'hermes', 'crontab']);
 
 // The relevant scheduled instant that should already have fired. Prefer the
 // source-authoritative nextRun (the scheduler's own next fire — it goes stale
@@ -36,6 +36,11 @@ export function evaluate(jobs: Job[], ctx: EvalCtx): EvalResult {
 
     const scheduled = scheduledInstant(job, ctx.now);
     if (!scheduled) continue;                                          // no usable schedule -> not overdue
+    if (job.source === 'crontab') {
+      const since = job.lastRun?.observableSince;
+      if (!since || !job.lastRun?.at) continue;                        // logs unreadable or no observed fire -> can't conclude
+      if (scheduled.getTime() < new Date(since).getTime()) continue;   // missed slot predates the observable window
+    }
     if (ctx.now.getTime() - scheduled.getTime() <= graceMs) continue;  // future, or within grace
     if (boot && scheduled.getTime() < boot.getTime()) continue;        // missed during host downtime
     const lastAt = job.lastRun?.at ? new Date(job.lastRun.at).getTime() : 0;
