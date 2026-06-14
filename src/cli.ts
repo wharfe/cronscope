@@ -10,13 +10,14 @@ import { crontabConnector } from './connectors/crontab.js';
 import { systemdConnector } from './connectors/systemd.js';
 import { githubActionsConnector } from './connectors/github-actions.js';
 import { cloudflareConnector } from './connectors/cloudflare.js';
+import { hermesConnector } from './connectors/hermes.js';
 import { loadNotifyState, saveNotifyState } from './store/notify-state.js';
 import { saveSnapshot } from './store/snapshot.js';
 import { evaluate } from './core/evaluate.js';
 import { formatDigest, sendSlack } from './outputs/slack.js';
 import { serveSnapshot } from './outputs/web.js';
 
-const CONNECTORS = [crontabConnector, systemdConnector, githubActionsConnector, cloudflareConnector];
+const CONNECTORS = [crontabConnector, systemdConnector, githubActionsConnector, cloudflareConnector, hermesConnector];
 const CFG_DIR = join(homedir(), '.config', 'cronscope');
 const SNAP_PATH = join(CFG_DIR, 'state.json');
 const NOTIFY_PATH = join(CFG_DIR, 'notify-state.json');
