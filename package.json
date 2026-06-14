@@ -1,6 +1,6 @@
 {
   "name": "cronscope",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Cross-surface discovery and monitoring of scheduled jobs (crontab, systemd, GitHub Actions, Cloudflare) from one CLI.",
   "keywords": [
     "cron",
