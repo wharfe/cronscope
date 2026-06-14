@@ -6,7 +6,7 @@ export type Availability =
   | { state: 'unavailable'; reason: string }
   | { state: 'skipped'; reason: string };
 
-export interface LastRun { status: RunStatus; at?: string; exitCode?: number; fetchedAt: string; }
+export interface LastRun { status: RunStatus; at?: string; exitCode?: number; fetchedAt: string; observableSince?: string; }
 
 export interface Job {
   id: string;
@@ -43,6 +43,7 @@ export interface Ctx {
   env: Record<string, string | undefined>;
   homeDir: string;
   scanRoots: string[];
+  timezone?: string;   // IANA tz (e.g. 'Asia/Tokyo'); resolved in runtime, used by the crontab connector
 }
 
 export interface Connector {
