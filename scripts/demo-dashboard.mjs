@@ -12,6 +12,7 @@ const snap = {
     systemd: { state: 'available' },
     'github-actions': { state: 'available' },
     cloudflare: { state: 'available' },
+    hermes: { state: 'available' },
   },
   jobs: [
     { id: 'systemd|backup.timer', source: 'systemd', name: 'backup.timer',
@@ -34,6 +35,10 @@ const snap = {
       schedule: { raw: '0 9 * * 1', kind: 'cron', timezone: 'UTC', nextRun: '2026-06-15T09:00:00.000Z', nextRunSource: 'computed' },
       target: 'newsletter-cron', location: 'cloudflare:demo-account',
       lastRun: { status: 'unknown', fetchedAt: '2026-06-13T09:00:00.000Z' } },
+    { id: 'hermes|demojob', source: 'hermes', name: 'daily-digest',
+      schedule: { raw: '0 7 * * *', kind: 'cron', nextRun: '2026-06-14T07:00:00.000Z', nextRunSource: 'source-authoritative' },
+      target: 'digest.sh', location: 'hermes cron',
+      lastRun: { status: 'success', at: '2026-06-13T07:00:00.000Z', fetchedAt: '2026-06-13T09:00:00.000Z' } },
   ],
 };
 
