@@ -42,4 +42,43 @@ describe('evaluate', () => {
     const r = evaluate(jobs, { now, bootAt: '2026-06-12T09:00:00Z', graceMinutes: 60 });
     expect(r.overdues).toHaveLength(0);
   });
+
+  it('flags a hermes failure (now status-bearing)', () => {
+    const jobs = [job({ id: 'hf', source: 'hermes', lastRun: { status: 'failure', fetchedAt: 't' } })];
+    const r = evaluate(jobs, { now, bootAt, graceMinutes: 60 });
+    expect(r.failures.map(j => j.id)).toEqual(['hf']);
+  });
+
+  it('flags a hermes job overdue via stale authoritative nextRun (gateway down)', () => {
+    // next_run_at stuck in the past at 08:00; host up since midnight; last run before it
+    const jobs = [job({ id: 'ho', source: 'hermes',
+      schedule: { raw: 'every 10m', kind: 'interval', nextRun: '2026-06-12T08:00:00Z', nextRunSource: 'source-authoritative' },
+      lastRun: { status: 'success', at: '2026-06-12T07:50:00Z', fetchedAt: 't' } })];
+    const r = evaluate(jobs, { now, bootAt, graceMinutes: 60 });
+    expect(r.overdues.map(j => j.id)).toEqual(['ho']);
+  });
+
+  it('does NOT flag a healthy hermes job (authoritative nextRun in the future)', () => {
+    const jobs = [job({ id: 'hh', source: 'hermes',
+      schedule: { raw: '*/10 * * * *', kind: 'cron', nextRun: '2026-06-12T12:00:00Z', nextRunSource: 'source-authoritative' },
+      lastRun: { status: 'success', at: '2026-06-12T10:00:00Z', fetchedAt: 't' } })];
+    const r = evaluate(jobs, { now, bootAt, graceMinutes: 60 });
+    expect(r.overdues).toHaveLength(0);
+  });
+
+  it('does NOT flag a disabled hermes job (no nextRun, non-cron) as overdue', () => {
+    const jobs = [job({ id: 'hd', source: 'hermes',
+      schedule: { raw: 'every 2h', kind: 'interval', nextRunSource: 'unknown' },
+      lastRun: { status: 'success', at: '2026-06-12T07:00:00Z', fetchedAt: 't' } })];
+    const r = evaluate(jobs, { now, bootAt, graceMinutes: 60 });
+    expect(r.overdues).toHaveLength(0);
+  });
+
+  it('systemd non-regression: healthy authoritative nextRun (future) is NOT overdue', () => {
+    const jobs = [job({ id: 'sd', source: 'systemd',
+      schedule: { raw: 'next=2026-06-12T20:00:00Z', kind: 'systemd-oncalendar', nextRun: '2026-06-12T20:00:00Z', nextRunSource: 'source-authoritative' },
+      lastRun: { status: 'success', at: '2026-06-12T08:00:00Z', fetchedAt: 't' } })];
+    const r = evaluate(jobs, { now, bootAt, graceMinutes: 60 });
+    expect(r.overdues).toHaveLength(0);
+  });
 });
