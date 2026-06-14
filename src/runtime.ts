@@ -46,5 +46,6 @@ export function makeCtx(scanRoots: string[]): Ctx {
     env: process.env,
     homeDir: homedir(),
     scanRoots,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
   };
 }
