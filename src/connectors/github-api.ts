@@ -138,9 +138,15 @@ export async function fetchScheduledRuns(ctx: Ctx, ref: GhRepoRef, workflowId: n
   // The API returns newest-first in practice but does not promise it, and a
   // re-run keeps its original created_at. Sort explicitly: an out-of-order page
   // would pick the wrong `newest` and make every gap negative.
-  const runs = raw
-    .filter((r) => !isNaN(new Date(r?.created_at).getTime()))
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  // Every element has to be usable. Silently dropping malformed ones lets a
+  // wholly malformed page collapse to "this workflow never ran" -- which reads
+  // as healthy AND drops any standing alarm as recovered.
+  for (const r of raw) {
+    if (typeof r?.created_at !== 'string' || isNaN(new Date(r.created_at).getTime())) {
+      return { ok: false, reason: 'unexpected response shape (run entry)' };
+    }
+  }
+  const runs = [...raw].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
   if (runs.length === 0) return { ok: true, value: { newest: null, samples: 0 } };
   const times = runs.map((r) => new Date(r.created_at).getTime());
   const gaps: number[] = [];
@@ -150,13 +156,18 @@ export async function fetchScheduledRuns(ctx: Ctx, ref: GhRepoRef, workflowId: n
   // window to derive from a declared cron yet. Stored to calibrate one later
   // (wharfe/cronscope#3).
   const newest = runs[0];
+  // GitHub always sends these. Missing them would silently skip the re-run
+  // check below, which is the whole point of this function.
+  if (typeof newest.id !== 'number' || typeof newest.run_attempt !== 'number') {
+    return { ok: false, reason: 'unexpected response shape (run entry: id/run_attempt)' };
+  }
   let conclusion: string | null = newest.conclusion ?? null;
   // A re-run does NOT get a new run: GitHub adds an attempt to the same run and
   // the event stays `schedule`. So the listing's conclusion is the re-run's,
   // and a manual re-run that went green would hide the scheduled slot that
   // failed -- the exact masking `event=schedule` was chosen to prevent. Ask for
   // the first attempt, which is the scheduled slot's own outcome.
-  if (typeof newest.run_attempt === 'number' && newest.run_attempt > 1 && typeof newest.id === 'number') {
+  if (newest.run_attempt > 1) {
     const first = await getJson(ctx, `${API}/repos/${ref.owner}/${ref.repo}/actions/runs/${newest.id}/attempts/1`, token);
     if (!first.ok) return { ok: false, reason: `first attempt of the newest scheduled run unavailable: ${first.reason}` };
     if (typeof first.value?.conclusion === 'undefined') return { ok: false, reason: 'unexpected response shape (run attempt)' };

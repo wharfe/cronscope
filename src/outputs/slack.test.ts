@@ -60,8 +60,31 @@ describe('undeterminedNotices', () => {
     expect(undeterminedNotices(jobs)).toEqual(['github-actions: HTTP 401 (2 jobs undetermined)']);
   });
 
-  it('says nothing about a source that is unknown by construction', () => {
-    const cron: Job = { ...gha({}), source: 'crontab', lastRun: { status: 'unknown', fetchedAt: 'x' } };
+  it('says nothing about a source that is unknown by construction, even with a reason', () => {
+    // The reason is present on purpose: without it this passes with the
+    // source check removed, so it would constrain nothing.
+    const cron: Job = { ...gha({}), source: 'crontab',
+      lastRun: { status: 'unknown', fetchedAt: 'x', undeterminedReason: 'HTTP 500' } };
     expect(undeterminedNotices([cron])).toEqual([]);
+  });
+
+  it('says nothing about a workflow the user disabled on purpose', () => {
+    const off = gha({ state: 'disabled_manually',
+      lastRun: { status: 'unknown', fetchedAt: 'x', undeterminedReason: 'HTTP 500' } });
+    expect(undeterminedNotices([off])).toEqual([]);
+  });
+});
+
+describe('sendSlack delivery', () => {
+  it('resolves when Slack accepts the post', async () => {
+    const fetchFn = (async () => ({ ok: true, status: 200 })) as unknown as typeof fetch;
+    await expect(sendSlack(fetchFn, 'https://hooks.example/x', 'hi')).resolves.toBeUndefined();
+  });
+
+  it('throws when Slack rejects it, so the caller cannot record it as delivered', async () => {
+    // A 410 (revoked webhook) that resolved quietly would mark the alert sent,
+    // and the next state change is the earliest it could ever go out again.
+    const fetchFn = (async () => ({ ok: false, status: 410 })) as unknown as typeof fetch;
+    await expect(sendSlack(fetchFn, 'https://hooks.example/x', 'hi')).rejects.toThrow('410');
   });
 });

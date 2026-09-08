@@ -98,8 +98,24 @@ export const githubActionsConnector: Connector = {
         if (isVendoredWorkflowPath(file)) continue;
         const rel = relPath(ctx, file);
         if (repoDepth(rel) > MAX_REPO_DEPTH) continue; // skip deeply-nested vendored/submodule workflows
+        const jobId = 'gha|' + createHash('sha1').update(rel).digest('hex').slice(0, 12);
         let doc: any;
-        try { doc = parse(await ctx.readFile(file)); } catch { continue; }
+        try {
+          doc = parse(await ctx.readFile(file));
+        } catch (e) {
+          // Do NOT drop it. The job vanishing from the snapshot reads as
+          // "recovered" to the notify state, so a workflow whose file broke
+          // would take its standing alarm with it -- and a broken workflow is
+          // exactly the one worth watching. The id is derived from the path,
+          // so the job keeps its identity across the failure.
+          jobs.push({
+            id: jobId, source: 'github-actions', name: rel, target: rel, location: rel,
+            schedule: { raw: '(unreadable)', kind: 'cron', timezone: 'UTC', nextRunSource: 'unknown' },
+            lastRun: { status: 'unknown', fetchedAt,
+                       undeterminedReason: `workflow file could not be read or parsed: ${(e as Error).message}` },
+          });
+          continue;
+        }
         const schedules = doc?.on?.schedule;
         if (!Array.isArray(schedules)) continue;
         const crons: string[] = schedules
@@ -172,7 +188,7 @@ export const githubActionsConnector: Connector = {
           // One job per workflow, not per cron entry: GitHub reports runs per
           // workflow, so per-entry jobs would share one lastRun and a stopped
           // entry would hide behind a healthy sibling.
-          id: 'gha|' + createHash('sha1').update(rel).digest('hex').slice(0, 12),
+          id: jobId,
           source: 'github-actions',
           name: rel,
           schedule: {

@@ -1,5 +1,5 @@
 import type { Job } from '../types.js';
-import { STATUS_KNOWABLE } from '../core/sources.js';
+import { isUndetermined } from '../core/sources.js';
 
 // One line per (source, reason) pair. A job counts only when its source is
 // meant to know its status and this run recorded why it could not be read --
@@ -8,9 +8,8 @@ import { STATUS_KNOWABLE } from '../core/sources.js';
 export function undeterminedNotices(jobs: Job[]): string[] {
   const counts = new Map<string, number>();
   for (const j of jobs) {
-    const reason = j.lastRun?.undeterminedReason;
-    if (!STATUS_KNOWABLE.has(j.source) || !reason) continue;
-    const key = `${j.source}: ${reason}`;
+    if (!isUndetermined(j)) continue;
+    const key = `${j.source}: ${j.lastRun!.undeterminedReason!}`;
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return [...counts].map(([key, n]) => `${key} (${n} job${n === 1 ? '' : 's'} undetermined)`);
@@ -28,9 +27,13 @@ export function formatDigest(failures: Job[], overdues: Job[], notices: string[]
   return lines.join('\n') || 'cronscope: all clear';
 }
 
+// Throws unless Slack actually accepted it. A 401 / 410 / 429 that resolved
+// quietly would let the caller record the alert as delivered, and the next
+// state change is the earliest it could ever be sent again.
 export async function sendSlack(fetchFn: typeof fetch, webhookUrl: string, text: string): Promise<void> {
-  await fetchFn(webhookUrl, {
+  const res: any = await fetchFn(webhookUrl, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text }),
   } as any);
+  if (!res?.ok) throw new Error(`Slack webhook responded ${res?.status ?? 'with no status'}`);
 }

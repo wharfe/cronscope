@@ -1,4 +1,4 @@
-import type { JobSource } from '../types.js';
+import type { Job, JobSource } from '../types.js';
 
 // Sources whose jobs can raise a failure / overdue alarm.
 export const ALARMABLE: ReadonlySet<JobSource> =
@@ -15,3 +15,13 @@ export const ALARMABLE: ReadonlySet<JobSource> =
 // github-actions connector sets that; systemd and hermes are listed because
 // they could, not because they do.
 export const STATUS_KNOWABLE: ReadonlySet<JobSource> = new Set(['systemd', 'hermes', 'github-actions']);
+
+// The single test for "we failed to read this", used by both the notify state
+// and the Slack output. Keeping it in one place is the point: two copies is how
+// a source falls out of one of them unnoticed.
+export function isUndetermined(j: Job): boolean {
+  // A workflow the user switched off is display-only by contract (README), so
+  // a run-history failure on it must not become a notice about it.
+  if (j.state === 'disabled_manually') return false;
+  return STATUS_KNOWABLE.has(j.source) && !!j.lastRun?.undeterminedReason;
+}

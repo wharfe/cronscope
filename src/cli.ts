@@ -87,16 +87,27 @@ async function main() {
     const keys = noticeKeys(snap.jobs);
     const toSend = noticesToSend(state.notices, keys, ctx.now());
 
-    if (newly.length || toSend.length) {
+    // Nothing to say counts as delivered; anything else has to actually reach
+    // Slack before the state advances. Recording an undelivered alert as sent
+    // means it is never sent again until the job changes state -- and with no
+    // webhook configured that would also swallow every failure standing at the
+    // moment one is finally configured.
+    let delivered = !(newly.length || toSend.length);
+    if (!delivered) {
       const webhook = process.env.CRONSCOPE_SLACK_WEBHOOK_URL;
       const text = formatDigest(
         newly.filter(([, s]) => s === 'failure').map(([id]) => failures.find(j => j.id === id)!),
         newly.filter(([, s]) => s === 'overdue').map(([id]) => overdues.find(j => j.id === id)!),
         undeterminedNotices(jobsForKeys(snap.jobs, toSend)),
       );
-      if (webhook) await sendSlack(ctx.fetch, webhook, text);
-      else console.log('[no CRONSCOPE_SLACK_WEBHOOK_URL] would notify:\n' + text);
+      if (webhook) {
+        await sendSlack(ctx.fetch, webhook, text);   // throws unless Slack accepted it
+        delivered = true;
+      } else {
+        console.log('[no CRONSCOPE_SLACK_WEBHOOK_URL] would notify:\n' + text);
+      }
     }
+    if (!delivered) return;   // leave the state untouched so the next run retries
 
     state.lastCheckAt = at;
     state.jobs = carryOverJobs(state.jobs, snap.jobs, snap.connectors, current, at);

@@ -73,10 +73,20 @@ describe('noticeKeys', () => {
     expect(noticeKeys(jobs)).toEqual(['github-actions/http-4xx']);
   });
 
-  it('ignores sources that are unknown by construction', () => {
+  it('ignores sources that are unknown by construction, even with a reason attached', () => {
     // crontab and cloudflare never report status; that is not a reading failure.
-    expect(noticeKeys([mkJob('x', 'crontab', { lastRun: { status: 'unknown', fetchedAt: 'x' } })])).toEqual([]);
-    expect(noticeKeys([mkJob('y', 'cloudflare', { lastRun: { status: 'unknown', fetchedAt: 'x' } })])).toEqual([]);
+    // The reason is set deliberately: without it the assertion would still pass
+    // with the STATUS_KNOWABLE check deleted, and constrain nothing.
+    expect(noticeKeys([undet('x', 'crontab', 'HTTP 500')])).toEqual([]);
+    expect(noticeKeys([undet('y', 'cloudflare', 'HTTP 500')])).toEqual([]);
+  });
+
+  it('ignores a workflow the user disabled on purpose', () => {
+    // README says disabled_manually is display-only; a run-history failure on
+    // it must not become a notice about it.
+    const j = mkJob('gha|1', 'github-actions', { state: 'disabled_manually',
+      lastRun: { status: 'unknown', fetchedAt: 'x', undeterminedReason: 'HTTP 500' } });
+    expect(noticeKeys([j])).toEqual([]);
   });
 });
 

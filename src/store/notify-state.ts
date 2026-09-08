@@ -1,7 +1,7 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { Availability, Job, JobSource } from '../types.js';
-import { STATUS_KNOWABLE } from '../core/sources.js';
+import { isUndetermined } from '../core/sources.js';
 
 export type NoticeClass = 'no-token' | 'no-remote' | 'http-4xx' | 'http-5xx' | 'network' | 'skipped' | 'other';
 
@@ -36,14 +36,6 @@ export function classifyReason(reason: string): NoticeClass {
   if (http) return http[1].startsWith('4') ? 'http-4xx' : http[1].startsWith('5') ? 'http-5xx' : 'other';
   if (/fetch failed|timeout|abort|ENOTFOUND|ECONN|network/i.test(reason)) return 'network';
   return 'other';
-}
-
-// A job is undetermined only when its source is supposed to know its status AND
-// this run recorded why it could not be read. crontab / cloudflare are unknown
-// by construction; treating those as undetermined froze their notify-state
-// entries forever, so a recovered-then-failed job never alarmed twice.
-function isUndetermined(j: Job): boolean {
-  return STATUS_KNOWABLE.has(j.source) && !!j.lastRun?.undeterminedReason;
 }
 
 export function noticeKeys(jobs: Job[]): string[] {

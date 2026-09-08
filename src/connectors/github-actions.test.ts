@@ -94,7 +94,7 @@ describe('github-actions connector (API-backed)', () => {
 
   it('fills lastRun from the newest completed scheduled run', async () => {
     const c = apiCtx({ [WF_PATH]: WORKFLOW }, {
-      fetch: ghFetch(ACTIVE, [{ conclusion: 'failure', created_at: '2026-06-11T21:00:00Z' }]) });
+      fetch: ghFetch(ACTIVE, [{ id: 1, run_attempt: 1, conclusion: 'failure', created_at: '2026-06-11T21:00:00Z' }]) });
     const jobs = await githubActionsConnector.discover(c);
     expect(jobs[0].lastRun?.status).toBe('failure');
     expect(jobs[0].lastRun?.at).toBe('2026-06-11T21:00:00.000Z');
@@ -103,13 +103,13 @@ describe('github-actions connector (API-backed)', () => {
 
   it('treats cancelled as a failure', async () => {
     const c = apiCtx({ [WF_PATH]: WORKFLOW }, {
-      fetch: ghFetch(ACTIVE, [{ conclusion: 'cancelled', created_at: '2026-06-11T21:00:00Z' }]) });
+      fetch: ghFetch(ACTIVE, [{ id: 1, run_attempt: 1, conclusion: 'cancelled', created_at: '2026-06-11T21:00:00Z' }]) });
     expect((await githubActionsConnector.discover(c))[0].lastRun?.status).toBe('failure');
   });
 
   it('treats skipped as undetermined, with a reason', async () => {
     const c = apiCtx({ [WF_PATH]: WORKFLOW }, {
-      fetch: ghFetch(ACTIVE, [{ conclusion: 'skipped', created_at: '2026-06-11T21:00:00Z' }]) });
+      fetch: ghFetch(ACTIVE, [{ id: 1, run_attempt: 1, conclusion: 'skipped', created_at: '2026-06-11T21:00:00Z' }]) });
     const j = (await githubActionsConnector.discover(c))[0];
     expect(j.lastRun?.status).toBe('unknown');
     expect(j.lastRun?.undeterminedReason).toContain('skipped');
@@ -118,7 +118,7 @@ describe('github-actions connector (API-backed)', () => {
   it('marks a disabled workflow and suppresses its future nextRun', async () => {
     const c = apiCtx({ [WF_PATH]: WORKFLOW }, {
       fetch: ghFetch([{ id: 7, path: '.github/workflows/daily.yml', state: 'disabled_inactivity' }],
-        [{ conclusion: 'success', created_at: '2026-06-01T21:00:00Z' }]) });
+        [{ id: 1, run_attempt: 1, conclusion: 'success', created_at: '2026-06-01T21:00:00Z' }]) });
     const j = (await githubActionsConnector.discover(c))[0];
     expect(j.state).toBe('disabled_inactivity');
     expect(j.schedule.nextRun).toBeUndefined();
@@ -147,8 +147,8 @@ describe('github-actions connector (API-backed)', () => {
 
   it('records observed gap statistics without judging on them', async () => {
     const c = apiCtx({ [WF_PATH]: WORKFLOW }, { fetch: ghFetch(ACTIVE, [
-      { conclusion: 'success', created_at: '2026-06-12T00:00:00Z' },
-      { conclusion: 'success', created_at: '2026-06-11T00:00:00Z' },
+      { id: 1, run_attempt: 1, conclusion: 'success', created_at: '2026-06-12T00:00:00Z' },
+      { id: 1, run_attempt: 1, conclusion: 'success', created_at: '2026-06-11T00:00:00Z' },
     ]) });
     expect((await githubActionsConnector.discover(c))[0].observed).toEqual(
       { samples: 2, medianGapHours: 24, maxGapHours: 24 });
@@ -186,7 +186,7 @@ describe('github-actions connector: states GitHub can report', () => {
   it('does not alarm on a neutral conclusion, but does not call it success either', async () => {
     // GitHub treats neutral as non-failing; branch protection passes on it.
     const c = apiCtx({ [WF_PATH]: WORKFLOW }, {
-      fetch: ghFetch(ACTIVE, [{ conclusion: 'neutral', created_at: '2026-06-11T21:00:00Z' }]) });
+      fetch: ghFetch(ACTIVE, [{ id: 1, run_attempt: 1, conclusion: 'neutral', created_at: '2026-06-11T21:00:00Z' }]) });
     const j = (await githubActionsConnector.discover(c))[0];
     expect(j.lastRun?.status).toBe('unknown');
     expect(j.lastRun?.undeterminedReason).toContain('neutral');
@@ -212,8 +212,32 @@ describe('github-actions connector: states GitHub can report', () => {
         if (cmd.includes('rev-parse')) return { stdout: '/home/u/dev/proj\n', stderr: '', code: 0 };
         return { stdout: 'https://github.com/wharfe/proj.git\n', stderr: '', code: 0 };
       },
-      fetch: ghFetch(ACTIVE, [{ conclusion: 'failure', created_at: '2026-06-11T21:00:00Z' }]),
+      fetch: ghFetch(ACTIVE, [{ id: 1, run_attempt: 1, conclusion: 'failure', created_at: '2026-06-11T21:00:00Z' }]),
     });
     expect(await githubActionsConnector.discover(c)).toEqual([]);
+  });
+});
+
+describe('a workflow file we cannot read', () => {
+  const BROKEN = 'name: x\non:\n  schedule:\n    - cron: "0 0 * * *"\n  bad: [unclosed\n';
+
+  it('still emits a job, with the reason, instead of dropping it from the snapshot', async () => {
+    // Dropping it reads as "recovered" to the notify state, so a workflow whose
+    // file broke would take its standing alarm with it -- and a broken workflow
+    // is exactly the one worth watching.
+    const c = apiCtx({ [WF_PATH]: BROKEN }, { fetch: ghFetch(ACTIVE, []) });
+    const jobs = await githubActionsConnector.discover(c);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].lastRun?.status).toBe('unknown');
+    expect(jobs[0].lastRun?.undeterminedReason).toContain('could not be read or parsed');
+    expect(jobs[0].schedule.nextRun).toBeUndefined();
+  });
+
+  it('keeps the same job id as when the file parsed, so the alarm survives', async () => {
+    const good = await githubActionsConnector.discover(
+      apiCtx({ [WF_PATH]: WORKFLOW }, { fetch: ghFetch(ACTIVE, []) }));
+    const broken = await githubActionsConnector.discover(
+      apiCtx({ [WF_PATH]: BROKEN }, { fetch: ghFetch(ACTIVE, []) }));
+    expect(broken[0].id).toBe(good[0].id);
   });
 });

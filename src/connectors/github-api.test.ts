@@ -140,9 +140,9 @@ describe('fetchScheduledRuns', () => {
     const c = ctx({ fetch: (async (url: string) => {
       seen = String(url);
       return { ok: true, status: 200, json: async () => ({ workflow_runs: [
-        { conclusion: 'failure', created_at: '2026-09-08T00:00:00Z' },
-        { conclusion: 'success', created_at: '2026-09-07T00:00:00Z' },
-        { conclusion: 'success', created_at: '2026-09-05T00:00:00Z' },
+        { id: 3, run_attempt: 1, conclusion: 'failure', created_at: '2026-09-08T00:00:00Z' },
+        { id: 2, run_attempt: 1, conclusion: 'success', created_at: '2026-09-07T00:00:00Z' },
+        { id: 1, run_attempt: 1, conclusion: 'success', created_at: '2026-09-05T00:00:00Z' },
       ] }) };
     }) as unknown as typeof fetch });
     const got = await fetchScheduledRuns(c, REF, 42, TOKEN);
@@ -159,8 +159,8 @@ describe('fetchScheduledRuns', () => {
 
   it('picks the newest by created_at even when the page is out of order', async () => {
     const c = ctx({ fetch: fetchStub({ '/runs': { body: { workflow_runs: [
-      { conclusion: 'success', created_at: '2026-09-05T00:00:00Z' },
-      { conclusion: 'failure', created_at: '2026-09-08T00:00:00Z' },
+      { id: 1, run_attempt: 1, conclusion: 'success', created_at: '2026-09-05T00:00:00Z' },
+      { id: 2, run_attempt: 1, conclusion: 'failure', created_at: '2026-09-08T00:00:00Z' },
     ] } } }) });
     const got = await fetchScheduledRuns(c, REF, 42, TOKEN);
     expect(got.ok).toBe(true);
@@ -267,5 +267,27 @@ describe('workflow state mapping', () => {
     expect(got.ok).toBe(true);
     if (!got.ok) return;
     expect([...got.value.keys()]).toEqual(['.github/workflows/a.yml', '.github/workflows/b.yml']);
+  });
+});
+
+describe('run entries must be usable, not silently dropped', () => {
+  it('rejects a page whose entries lack a usable created_at', async () => {
+    // Dropping them would collapse the page to "never ran" -- healthy-looking,
+    // and it drops any standing alarm as recovered.
+    const c = ctx({ fetch: fetchStub({ '/runs': { body: { workflow_runs: [
+      { id: 1, run_attempt: 1, conclusion: 'failure' }] } } }) });
+    const got = await fetchScheduledRuns(c, REF, 42, TOKEN);
+    expect(got.ok).toBe(false);
+    if (got.ok) return;
+    expect(got.reason).toContain('run entry');
+  });
+
+  it('rejects a newest run with no id or run_attempt rather than skipping the re-run check', async () => {
+    const c = ctx({ fetch: fetchStub({ '/runs': { body: { workflow_runs: [
+      { conclusion: 'success', created_at: '2026-09-08T00:00:00Z' }] } } }) });
+    const got = await fetchScheduledRuns(c, REF, 42, TOKEN);
+    expect(got.ok).toBe(false);
+    if (got.ok) return;
+    expect(got.reason).toContain('id/run_attempt');
   });
 });
