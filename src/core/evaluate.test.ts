@@ -129,3 +129,57 @@ describe('evaluate', () => {
     expect(r.overdues).toHaveLength(0);
   });
 });
+
+describe('evaluate: github-actions', () => {
+  const GHA_NOW = new Date('2026-09-08T12:00:00Z');
+  function gha(over: Partial<Job> = {}): Job {
+    return {
+      id: 'gha|1', source: 'github-actions', name: 'proj/.github/workflows/daily.yml',
+      target: 'x', location: 'x',
+      schedule: { raw: '0 21 * * *', kind: 'cron', timezone: 'UTC',
+                  nextRun: '2026-09-08T21:00:00.000Z', nextRunSource: 'computed' },
+      lastRun: { status: 'success', at: '2026-09-07T21:00:00.000Z', fetchedAt: 'x' },
+      ...over,
+    } as Job;
+  }
+
+  it('reports a failed scheduled run', () => {
+    const r = evaluate([gha({ lastRun: { status: 'failure', at: '2026-09-07T21:00:00.000Z', fetchedAt: 'x' } })],
+      { now: GHA_NOW, graceMinutes: 60 });
+    expect(r.failures.map(j => j.id)).toEqual(['gha|1']);
+  });
+
+  it('reports a workflow GitHub disabled for inactivity, with no run history at all', () => {
+    const r = evaluate([gha({ state: 'disabled_inactivity',
+      schedule: { raw: '*/15 * * * *', kind: 'cron', timezone: 'UTC', nextRunSource: 'unknown' },
+      lastRun: { status: 'never', fetchedAt: 'x' } })], { now: GHA_NOW, graceMinutes: 60 });
+    expect(r.overdues.map(j => j.id)).toEqual(['gha|1']);
+  });
+
+  it('stays silent about a workflow the user disabled on purpose', () => {
+    const r = evaluate([gha({ state: 'disabled_manually',
+      lastRun: { status: 'failure', at: '2026-06-02T21:00:00.000Z', fetchedAt: 'x' } })],
+      { now: GHA_NOW, graceMinutes: 60 });
+    expect(r.failures).toEqual([]);
+    expect(r.overdues).toEqual([]);
+  });
+
+  it('never derives overdue from the declared cron, however stale the last run', () => {
+    // A */15 workflow GitHub throttles to hours must not alarm just because the
+    // declared period elapsed -- measured 2026-09-08: open-gikai/uptime fires
+    // every 4.4h against a 15-minute declaration.
+    const r = evaluate([gha({
+      schedule: { raw: '*/15 * * * *', kind: 'cron', timezone: 'UTC', nextRunSource: 'computed' },
+      lastRun: { status: 'success', at: '2026-09-08T07:30:00.000Z', fetchedAt: 'x' } })],
+      { now: GHA_NOW, graceMinutes: 60 });
+    expect(r.overdues).toEqual([]);
+  });
+
+  it('does not alarm on an undetermined or never-run workflow that is still active', () => {
+    const never = gha({ id: 'gha|never', lastRun: { status: 'never', fetchedAt: 'x' } });
+    const unknown = gha({ id: 'gha|unknown', lastRun: { status: 'unknown', fetchedAt: 'x', undeterminedReason: 'HTTP 401' } });
+    const r = evaluate([never, unknown], { now: GHA_NOW, graceMinutes: 60 });
+    expect(r.overdues).toEqual([]);
+    expect(r.failures).toEqual([]);
+  });
+});
