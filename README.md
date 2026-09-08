@@ -28,9 +28,15 @@ npx cronscope check         # fail/overdue を Slack 通知（systemd timer で�
 |---|---|---|---|
 | 0 | crontab | `crontab -l` をパース。cron ログ(journalctl/syslog)から last-fired を best-effort 取得し overdue 検知 | 不要 |
 | 0 | systemd | user timer/service を `systemctl --user show` | 不要 |
-| 0 | github-actions | `~/dev` 配下の `.github/workflows/*.yml` を走査 | 不要 |
+| 0 | github-actions | `~/dev` 配下の `.github/workflows/*.yml` を走査。token があれば API で `event=schedule` の直近 run 成否と workflow の有効/無効を取得 | 任意（あれば fail 検知） |
 | 0 | hermes | [Hermes Agent](https://github.com/NousResearch/hermes-agent) の `~/.hermes/cron/jobs.json` を読み、last-run 成否・次回実行を取得 | 不要 |
 | 1 | cloudflare | API で Workers cron triggers を列挙（BYOK） | API token |
+
+github-actions は token があれば fail 検知の対象になる。判定は `event=schedule` の run だけを見るので、**手動再実行の成功が定時実行の失敗を隠さない**。GitHub が無操作により schedule を無効化した状態（`disabled_inactivity`）も検知する。人が意図的に止めた `disabled_manually` は表示のみで通知しない。
+
+一方、**workflow が有効なまま GitHub が静かに発火を止めた場合は検知しない**。GitHub の scheduler は宣言した cron どおりに走らず（実測 2026-09-08: `*/15` 宣言の workflow の実発火間隔は中央値 4.4 時間、宣言の 1/18）、宣言周期から沈黙の窓を作ると誤検知か永久沈黙のどちらかになる。観測した発火間隔は snapshot に記録しており、実例が出た時点で実データから窓を決める（[#3](https://github.com/wharfe/cronscope/issues/3)）。
+
+token が無い場合は discovery だけ動き、status は `unknown` のまま `check` が「判定不能」として毎回 1 行報告する（`disabled_*` も判別できないので `nextRun` は計算した値が出る）。
 
 hermes / systemd は last-run 成否が取れるため fail / overdue アラートの対象になる（hermes は権威 `next_run_at` を使い、スケジューラ停止で発火が止まると overdue として検知する）。
 
@@ -44,6 +50,7 @@ crontab は exit code を残さないため status は `unknown`（成否は取�
 
 トークン類は **env 優先**（config に生値を置かない）:
 - `CRONSCOPE_CF_API_TOKEN` / `CRONSCOPE_CF_ACCOUNT_ID` — Cloudflare（任意）
+- `CRONSCOPE_GH_TOKEN`（無ければ `GITHUB_TOKEN`、それも無ければ `gh auth token`）— GitHub Actions の run 成否取得（任意）
 - `CRONSCOPE_SLACK_WEBHOOK_URL` — Slack 通知
 
 ## secret / プライバシー方針
