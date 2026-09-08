@@ -3,10 +3,17 @@ export type RunStatus = 'success' | 'failure' | 'unknown' | 'never';
 
 export type Availability =
   | { state: 'available' }
+  | { state: 'degraded'; reason: string }   // discovery works, status enrichment does not
   | { state: 'unavailable'; reason: string }
   | { state: 'skipped'; reason: string };
 
-export interface LastRun { status: RunStatus; at?: string; exitCode?: number; fetchedAt: string; observableSince?: string; }
+export interface LastRun {
+  status: RunStatus; at?: string; exitCode?: number; fetchedAt: string; observableSince?: string;
+  // Why the status could not be determined. Its presence -- not `status ===
+  // 'unknown'` -- is what marks a job as undetermined: crontab and cloudflare
+  // are unknown by construction and must never be reported as a reading failure.
+  undeterminedReason?: string;
+}
 
 export interface Job {
   id: string;
@@ -21,6 +28,9 @@ export interface Job {
   };
   target: string;
   location: string;
+  state?: 'active' | 'disabled_manually' | 'disabled_inactivity';
+  // Recorded only; no overdue window is derived from these yet (see #3).
+  observed?: { medianGapHours?: number; maxGapHours?: number; samples: number };
   lastRun?: LastRun;
 }
 

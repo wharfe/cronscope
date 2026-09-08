@@ -35,3 +35,16 @@ describe('runScan', () => {
     expect(snap.connectors.cloudflare?.state).toBe('unavailable');
   });
 });
+
+describe('runScan: degraded connectors', () => {
+  it('still discovers from a degraded connector and records the reason', async () => {
+    const gha = (id: string): Job => ({ id, source: 'github-actions', name: id, target: '', location: '',
+      schedule: { raw: '0 0 * * *', kind: 'cron', nextRunSource: 'computed' } });
+    const degraded: Connector = { id: 'github-actions', tier: 0,
+      availability: async () => ({ state: 'degraded', reason: 'no GitHub token' }),
+      discover: async () => [gha('gha-1')] };
+    const snap = await runScan([degraded], ctx, undefined);
+    expect(snap.jobs.map(x => x.id)).toEqual(['gha-1']);
+    expect(snap.connectors['github-actions']?.state).toBe('degraded');
+  });
+});
