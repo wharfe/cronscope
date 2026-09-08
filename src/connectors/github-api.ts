@@ -118,6 +118,16 @@ export async function fetchWorkflows(ctx: Ctx, ref: GhRepoRef, token: string): P
   return { ok: true, value: map };
 }
 
+function isPositiveInt(v: unknown): v is number {
+  return typeof v === 'number' && Number.isInteger(v) && v > 0;
+}
+
+// `null` means "not finished / no verdict"; anything else must be a string, or
+// statusOf() would coerce a stray object into a failure.
+function isConclusion(v: unknown): v is string | null {
+  return v === null || typeof v === 'string';
+}
+
 function median(xs: number[]): number {
   const s = [...xs].sort((a, b) => a - b);
   const m = Math.floor(s.length / 2);
@@ -158,8 +168,14 @@ export async function fetchScheduledRuns(ctx: Ctx, ref: GhRepoRef, workflowId: n
   const newest = runs[0];
   // GitHub always sends these. Missing them would silently skip the re-run
   // check below, which is the whole point of this function.
-  if (typeof newest.id !== 'number' || typeof newest.run_attempt !== 'number') {
+  // Positive integers, not merely "a number": run_attempt 0 or -1 would skip
+  // the re-run check below and let a re-run's success stand as the scheduled
+  // slot's own, which is the masking this function exists to prevent.
+  if (!isPositiveInt(newest.id) || !isPositiveInt(newest.run_attempt)) {
     return { ok: false, reason: 'unexpected response shape (run entry: id/run_attempt)' };
+  }
+  if (!isConclusion(newest.conclusion)) {
+    return { ok: false, reason: 'unexpected response shape (run entry: conclusion)' };
   }
   let conclusion: string | null = newest.conclusion ?? null;
   // A re-run does NOT get a new run: GitHub adds an attempt to the same run and
@@ -170,7 +186,8 @@ export async function fetchScheduledRuns(ctx: Ctx, ref: GhRepoRef, workflowId: n
   if (newest.run_attempt > 1) {
     const first = await getJson(ctx, `${API}/repos/${ref.owner}/${ref.repo}/actions/runs/${newest.id}/attempts/1`, token);
     if (!first.ok) return { ok: false, reason: `first attempt of the newest scheduled run unavailable: ${first.reason}` };
-    if (typeof first.value?.conclusion === 'undefined') return { ok: false, reason: 'unexpected response shape (run attempt)' };
+    // A number or object here would be coerced into "not success" = failure.
+    if (!isConclusion(first.value?.conclusion)) return { ok: false, reason: 'unexpected response shape (run attempt)' };
     conclusion = first.value.conclusion ?? null;
   }
   return {

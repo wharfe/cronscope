@@ -291,3 +291,35 @@ describe('run entries must be usable, not silently dropped', () => {
     expect(got.reason).toContain('id/run_attempt');
   });
 });
+
+describe('fields we actually rely on are validated, not just typed', () => {
+  const run = (over: Record<string, unknown>) => ({
+    id: 1, run_attempt: 1, conclusion: 'success', created_at: '2026-09-08T00:00:00Z', ...over });
+
+  it('rejects a non-positive run_attempt instead of skipping the re-run check', async () => {
+    const c = ctx({ fetch: fetchStub({ '/runs': { body: { workflow_runs: [run({ run_attempt: 0 })] } } }) });
+    const got = await fetchScheduledRuns(c, REF, 42, TOKEN);
+    expect(got.ok).toBe(false);
+    if (got.ok) return;
+    expect(got.reason).toContain('id/run_attempt');
+  });
+
+  it('rejects a conclusion that is not a string or null', async () => {
+    // statusOf() coerces anything not `success`/`skipped`/`neutral`/null into a
+    // failure, so a stray object would alarm.
+    const c = ctx({ fetch: fetchStub({ '/runs': { body: { workflow_runs: [run({ conclusion: { x: 1 } })] } } }) });
+    const got = await fetchScheduledRuns(c, REF, 42, TOKEN);
+    expect(got.ok).toBe(false);
+    if (got.ok) return;
+    expect(got.reason).toContain('conclusion');
+  });
+
+  it('rejects a first attempt whose conclusion is not a string or null', async () => {
+    const c = ctx({ fetch: (async (url: string) => String(url).includes('/attempts/1')
+      ? { ok: true, status: 200, json: async () => ({ conclusion: 7 }) }
+      : { ok: true, status: 200, json: async () => ({ workflow_runs: [run({ run_attempt: 2 })] }) }
+    ) as unknown as typeof fetch });
+    const got = await fetchScheduledRuns(c, REF, 42, TOKEN);
+    expect(got.ok).toBe(false);
+  });
+});

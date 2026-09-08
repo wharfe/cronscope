@@ -234,3 +234,41 @@ describe('notify-state migration', () => {
     expect((await loadNotifyState(p)).jobs).toEqual({});
   });
 });
+
+describe('failure classes stay distinct', () => {
+  it('does not collapse unrelated github-actions failures into one key', () => {
+    // Collapsed into `other`, a parse failure arriving while a neutral-run
+    // notice already stood was not a new incident and waited up to 24h.
+    expect(classifyReason('workflow file could not be read or parsed')).toBe('parse-error');
+    expect(classifyReason('run history unavailable: unexpected response shape (run entry)')).toBe('api-shape');
+    expect(classifyReason('unexpected workflow state: disabled_fork')).toBe('workflow-state');
+    expect(classifyReason('newest scheduled run ended neutral')).toBe('run-conclusion');
+    expect(new Set([
+      classifyReason('workflow file could not be read or parsed'),
+      classifyReason('unexpected workflow state: disabled_fork'),
+    ]).size).toBe(2);
+  });
+});
+
+describe('an undelivered alert must not swallow another job recovery', () => {
+  const avail2: Partial<Record<JobSource, Availability>> = { 'github-actions': { state: 'available' } };
+
+  it('drops the recovered job while the undelivered one goes back to pending', () => {
+    // The sequence that used to lose an alert permanently: A is recorded as
+    // notified; on the run where A recovers, something else cannot be
+    // delivered. Skipping the whole save kept A recorded as failing, so A
+    // failing again never read as `newly` and was never sent.
+    const prev = {
+      'gha|A': { status: 'failure' as const, notifiedAt: 'old', source: 'github-actions' as JobSource },
+      'gha|B': { status: 'failure' as const, notifiedAt: 'old', source: 'github-actions' as JobSource },
+    };
+    const jobs = [mkJob('gha|A', 'github-actions'), mkJob('gha|B', 'github-actions')];
+    const current = new Map([['gha|B', 'failure' as const]]);   // A recovered, B still failing
+    const saved = carryOverJobs(prev, jobs, avail2, current, 'now');
+    // What cli.ts does when delivery failed: only the alerts it tried to send
+    // are put back to pending.
+    delete saved['gha|B'];
+    expect(saved['gha|A']).toBeUndefined();   // recovery recorded, not frozen
+    expect(saved['gha|B']).toBeUndefined();   // stays pending, so it retries
+  });
+});

@@ -241,3 +241,14 @@ describe('a workflow file we cannot read', () => {
     expect(broken[0].id).toBe(good[0].id);
   });
 });
+
+it('never puts the parser diagnostic into the reason that gets persisted and posted', async () => {
+  // A YAML parse error quotes the offending source line. That string reaches
+  // the snapshot and Slack, so a token written into a broken workflow file
+  // would ride along with it.
+  const withSecret = 'on:\n  schedule:\n    - cron: "0 0 * * *"\n  token: ghp_MUSTNOTLEAK_0123456789\n  bad: [unclosed\n';
+  const c = apiCtx({ [WF_PATH]: withSecret }, { fetch: ghFetch(ACTIVE, []) });
+  const j = (await githubActionsConnector.discover(c))[0];
+  expect(j.lastRun?.undeterminedReason).toBe('workflow file could not be read or parsed');
+  expect(JSON.stringify(j)).not.toContain('ghp_MUSTNOTLEAK');
+});

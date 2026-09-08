@@ -3,7 +3,9 @@ import { dirname } from 'node:path';
 import type { Availability, Job, JobSource } from '../types.js';
 import { isUndetermined } from '../core/sources.js';
 
-export type NoticeClass = 'no-token' | 'no-remote' | 'http-4xx' | 'http-5xx' | 'network' | 'skipped' | 'other';
+export type NoticeClass =
+  | 'no-token' | 'no-remote' | 'http-4xx' | 'http-5xx' | 'network'
+  | 'skipped' | 'parse-error' | 'api-shape' | 'workflow-state' | 'run-conclusion' | 'other';
 
 export interface NotifyState {
   schemaVersion: 1;
@@ -32,6 +34,12 @@ export function classifyReason(reason: string): NoticeClass {
   if (/no GitHub token/i.test(reason)) return 'no-token';
   if (/origin|remote|repo root/i.test(reason)) return 'no-remote';
   if (/skipped/i.test(reason)) return 'skipped';
+  // These used to collapse into `other`, so a parse failure appearing while a
+  // neutral-run notice already stood was not a new incident and waited 24h.
+  if (/could not be read or parsed/i.test(reason)) return 'parse-error';
+  if (/unexpected response shape|not present in the GitHub API listing/i.test(reason)) return 'api-shape';
+  if (/unexpected workflow state/i.test(reason)) return 'workflow-state';
+  if (/neutral|no conclusion/i.test(reason)) return 'run-conclusion';
   const http = reason.match(/HTTP (\d{3})/);
   if (http) return http[1].startsWith('4') ? 'http-4xx' : http[1].startsWith('5') ? 'http-5xx' : 'other';
   if (/fetch failed|timeout|abort|ENOTFOUND|ECONN|network/i.test(reason)) return 'network';

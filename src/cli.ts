@@ -107,13 +107,16 @@ async function main() {
         console.log('[no CRONSCOPE_SLACK_WEBHOOK_URL] would notify:\n' + text);
       }
     }
-    if (!delivered) return;   // leave the state untouched so the next run retries
-
     state.lastCheckAt = at;
     state.jobs = carryOverJobs(state.jobs, snap.jobs, snap.connectors, current, at);
+    // Only the alerts we failed to deliver stay pending. Skipping the whole
+    // save would also discard OTHER jobs' recoveries, and a job still recorded
+    // as failing never reads as `newly` when it fails again -- the alert would
+    // be lost permanently rather than retried.
+    if (!delivered) for (const [id] of newly) delete state.jobs[id];
     // Keep the old notifiedAt when we deliberately stayed quiet, or the 24h
     // re-send timer would reset every hour and never elapse.
-    state.notices = nextNoticeState(state.notices, keys, toSend, at);
+    state.notices = nextNoticeState(state.notices, keys, delivered ? toSend : [], at);
     await saveNotifyState(NOTIFY_PATH, state);
   } else {
     console.error(`unknown command: ${cmd}`);

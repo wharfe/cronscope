@@ -102,7 +102,7 @@ export const githubActionsConnector: Connector = {
         let doc: any;
         try {
           doc = parse(await ctx.readFile(file));
-        } catch (e) {
+        } catch {
           // Do NOT drop it. The job vanishing from the snapshot reads as
           // "recovered" to the notify state, so a workflow whose file broke
           // would take its standing alarm with it -- and a broken workflow is
@@ -111,8 +111,12 @@ export const githubActionsConnector: Connector = {
           jobs.push({
             id: jobId, source: 'github-actions', name: rel, target: rel, location: rel,
             schedule: { raw: '(unreadable)', kind: 'cron', timezone: 'UTC', nextRunSource: 'unknown' },
+            // Fixed wording on purpose. A YAML parse error quotes the offending
+            // source line, and this string is persisted to the snapshot and
+            // posted to Slack -- a token written into a broken workflow file
+            // would ride along. The detail stays out of every output.
             lastRun: { status: 'unknown', fetchedAt,
-                       undeterminedReason: `workflow file could not be read or parsed: ${(e as Error).message}` },
+                       undeterminedReason: 'workflow file could not be read or parsed' },
           });
           continue;
         }
