@@ -55,8 +55,21 @@ function splitWorkflowPath(file: string): { repoDir: string; wfPath: string } | 
 function statusOf(conclusion: string | null): { status: 'success' | 'failure' | 'unknown'; reason?: string } {
   if (conclusion === 'success') return { status: 'success' };
   if (conclusion === 'skipped') return { status: 'unknown', reason: 'newest scheduled run was skipped (all jobs skipped)' };
+  // GitHub treats `neutral` as non-failing (branch protection passes on it), so
+  // alarming would be a false positive -- but it is not a success either.
+  if (conclusion === 'neutral') return { status: 'unknown', reason: 'newest scheduled run ended neutral' };
   if (conclusion === null) return { status: 'unknown', reason: 'newest scheduled run has no conclusion' };
   return { status: 'failure' };
+}
+
+// GitHub only runs `.github/workflows` at the REPOSITORY root. A workflow file
+// under a subdirectory is not a workflow at all -- but `git -C` walks up, so
+// resolving its origin would return the parent repo and attach that repo's run
+// history to a job that does not exist on GitHub.
+async function repoRootOf(ctx: Ctx, dir: string): Promise<string | null> {
+  const r = await ctx.run(['git', '-C', dir, 'rev-parse', '--show-toplevel']);
+  const out = r.stdout.trim();
+  return r.code === 0 && out ? out : null;
 }
 
 export const githubActionsConnector: Connector = {
@@ -74,6 +87,7 @@ export const githubActionsConnector: Connector = {
   async discover(ctx) {
     const token = await resolveToken(ctx);
     const refs = new Map<string, GhRepoRef | null>();
+    const roots = new Map<string, string | null>();
     const wfIndex = new Map<string, { map: Map<string, WorkflowInfo> | null; reason?: string }>();
     const jobs: Job[] = [];
     const now = ctx.now();
@@ -101,6 +115,8 @@ export const githubActionsConnector: Connector = {
           undetermined = 'no GitHub token';
         } else if (!split) {
           undetermined = 'cannot locate the repo root for this workflow';
+        } else if (await isNotAtRepoRoot(ctx, roots, split.repoDir)) {
+          continue; // not a real GitHub Actions workflow; do not invent a job for it
         } else {
           // Resolve the repo, and its workflow index, once per checkout.
           if (!refs.has(split.repoDir)) refs.set(split.repoDir, await resolveRepoRef(ctx, split.repoDir));
@@ -117,13 +133,14 @@ export const githubActionsConnector: Connector = {
             else {
               info = idx.map.get(split.wfPath);
               if (!info) undetermined = 'workflow not present in the GitHub API listing';
+              else if (info.state === 'other') undetermined = `unexpected workflow state: ${info.rawState}`;
             }
           }
         }
 
         let lastRun: LastRun = { status: 'unknown', fetchedAt, undeterminedReason: undetermined };
         let observed: Job['observed'];
-        if (token && info && split) {
+        if (token && info && info.state !== 'other' && split) {
           const got = await fetchScheduledRuns(ctx, refs.get(split.repoDir)!, info.id, token);
           if (!got.ok) {
             lastRun = { status: 'unknown', fetchedAt, undeterminedReason: `run history unavailable: ${got.reason}` };
@@ -143,10 +160,10 @@ export const githubActionsConnector: Connector = {
           }
         }
 
-        const state = info?.state;
+        const state = info && info.state !== 'other' ? info.state : undefined;
         // A disabled workflow has no next run. Computing one shows a future
         // time for something GitHub has already stopped firing.
-        const nexts = state && state !== 'active'
+        const nexts = (state && state !== 'active') || info?.state === 'other'
           ? []
           : crons.map((c) => cronNext(c, now, 'UTC')).filter((x): x is string => !!x).sort();
         const nextRun = nexts[0];
@@ -173,3 +190,13 @@ export const githubActionsConnector: Connector = {
     return jobs;
   },
 };
+
+// Cached per checkout: `git rev-parse` is a process spawn and several workflow
+// files usually share one repo. When the root cannot be determined we keep the
+// job -- being permissive is the pre-existing behaviour and a missing git is
+// not evidence that the workflow is bogus.
+async function isNotAtRepoRoot(ctx: Ctx, roots: Map<string, string | null>, repoDir: string): Promise<boolean> {
+  if (!roots.has(repoDir)) roots.set(repoDir, await repoRootOf(ctx, repoDir));
+  const root = roots.get(repoDir) ?? null;
+  return root !== null && root !== repoDir;
+}

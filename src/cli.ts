@@ -12,7 +12,7 @@ import { systemdConnector } from './connectors/systemd.js';
 import { githubActionsConnector } from './connectors/github-actions.js';
 import { cloudflareConnector } from './connectors/cloudflare.js';
 import { hermesConnector } from './connectors/hermes.js';
-import { loadNotifyState, saveNotifyState, noticeKeys, shouldSendNotices, carryOverJobs } from './store/notify-state.js';
+import { loadNotifyState, saveNotifyState, noticeKeys, noticesToSend, nextNoticeState, jobsForKeys, carryOverJobs } from './store/notify-state.js';
 import { saveSnapshot } from './store/snapshot.js';
 import { evaluate } from './core/evaluate.js';
 import { formatDigest, sendSlack, undeterminedNotices } from './outputs/slack.js';
@@ -52,9 +52,13 @@ async function main() {
     // discover() now calls the GitHub API (~15 requests per scan). Serving a
     // fresh scan per request would burn the 5000/h budget from one open tab and
     // starve `check` into reporting everything as undetermined.
-    let cached: { at: number; snap: Snapshot } | null = null;
+    // Single-flight: the check-then-assign has an await between its halves, so
+    // without holding the in-flight promise two concurrent requests both scan.
+    let cached: { at: number; snap: Promise<Snapshot> } | null = null;
     serveSnapshot(async () => {
-      if (!cached || Date.now() - cached.at >= 60_000) cached = { at: Date.now(), snap: (await doScan()).snap };
+      if (!cached || Date.now() - cached.at >= 60_000) {
+        cached = { at: Date.now(), snap: doScan().then((r) => r.snap) };
+      }
       return cached.snap;
     }, port);
     console.log(`cronscope serving on http://localhost:${port}`);
@@ -81,14 +85,14 @@ async function main() {
 
     const at = ctx.now().toISOString();
     const keys = noticeKeys(snap.jobs);
-    const sendNotices = shouldSendNotices(state.notices, keys, ctx.now());
+    const toSend = noticesToSend(state.notices, keys, ctx.now());
 
-    if (newly.length || sendNotices) {
+    if (newly.length || toSend.length) {
       const webhook = process.env.CRONSCOPE_SLACK_WEBHOOK_URL;
       const text = formatDigest(
         newly.filter(([, s]) => s === 'failure').map(([id]) => failures.find(j => j.id === id)!),
         newly.filter(([, s]) => s === 'overdue').map(([id]) => overdues.find(j => j.id === id)!),
-        sendNotices ? notices : [],
+        undeterminedNotices(jobsForKeys(snap.jobs, toSend)),
       );
       if (webhook) await sendSlack(ctx.fetch, webhook, text);
       else console.log('[no CRONSCOPE_SLACK_WEBHOOK_URL] would notify:\n' + text);
@@ -98,9 +102,7 @@ async function main() {
     state.jobs = carryOverJobs(state.jobs, snap.jobs, snap.connectors, current, at);
     // Keep the old notifiedAt when we deliberately stayed quiet, or the 24h
     // re-send timer would reset every hour and never elapse.
-    state.notices = keys.length
-      ? { keys, notifiedAt: sendNotices ? at : (state.notices?.notifiedAt ?? at) }
-      : null;
+    state.notices = nextNoticeState(state.notices, keys, toSend, at);
     await saveNotifyState(NOTIFY_PATH, state);
   } else {
     console.error(`unknown command: ${cmd}`);

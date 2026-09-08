@@ -32,13 +32,13 @@ describe('notify-state store', () => {
     const p = join(dir, 'notify.json');
     expect((await loadNotifyState(p)).jobs).toEqual({});
     await saveNotifyState(p, { schemaVersion: 1, lastCheckAt: '2026-06-12T10:00:00Z',
-      jobs: { a: { status: 'failure', notifiedAt: 't', source: 'systemd' } }, notices: null });
+      jobs: { a: { status: 'failure', notifiedAt: 't', source: 'systemd' } }, notices: {} });
     expect((await loadNotifyState(p)).jobs.a.status).toBe('failure');
   });
 });
 
 import { writeFile } from 'node:fs/promises';
-import { classifyReason, noticeKeys, shouldSendNotices, carryOverJobs } from './notify-state.js';
+import { classifyReason, noticeKeys, noticesToSend, nextNoticeState, jobsForKeys, carryOverJobs } from './notify-state.js';
 import type { Availability, Job, JobSource } from '../types.js';
 
 const mkJob = (id: string, source: JobSource, over: Partial<Job> = {}): Job => ({
@@ -80,31 +80,66 @@ describe('noticeKeys', () => {
   });
 });
 
-describe('shouldSendNotices', () => {
+describe('noticesToSend', () => {
   const t0 = new Date('2026-09-08T00:00:00Z');
-  it('sends the first time and stays quiet while the key set is unchanged', () => {
-    expect(shouldSendNotices(null, ['github-actions/no-token'], t0)).toBe(true);
-    const prev = { keys: ['github-actions/no-token'], notifiedAt: t0.toISOString() };
-    expect(shouldSendNotices(prev, ['github-actions/no-token'], new Date('2026-09-08T05:00:00Z'))).toBe(false);
+  const T0 = t0.toISOString();
+
+  it('sends a key the first time and stays quiet afterwards', () => {
+    expect(noticesToSend({}, ['github-actions/no-token'], t0)).toEqual(['github-actions/no-token']);
+    expect(noticesToSend({ 'github-actions/no-token': T0 }, ['github-actions/no-token'],
+      new Date('2026-09-08T05:00:00Z'))).toEqual([]);
   });
 
-  it('does not re-send when one repo of many recovers but the class remains', () => {
-    const prev = { keys: ['github-actions/http-4xx'], notifiedAt: t0.toISOString() };
-    expect(shouldSendNotices(prev, ['github-actions/http-4xx'], new Date('2026-09-08T01:00:00Z'))).toBe(false);
+  it('does not re-send a standing key when a different one disappears', () => {
+    // The bug this guards: comparing the whole key set meant one class
+    // recovering re-sent every other class, so a flapping reason alarmed hourly.
+    const prev = { 'github-actions/http-4xx': T0, 'github-actions/http-5xx': T0 };
+    expect(noticesToSend(prev, ['github-actions/http-4xx'], new Date('2026-09-08T01:00:00Z'))).toEqual([]);
   });
 
-  it('sends again when a new class appears', () => {
-    const prev = { keys: ['github-actions/http-4xx'], notifiedAt: t0.toISOString() };
-    expect(shouldSendNotices(prev, ['github-actions/http-4xx', 'github-actions/no-token'], t0)).toBe(true);
+  it('sends only the newly appeared key', () => {
+    const prev = { 'github-actions/http-4xx': T0 };
+    expect(noticesToSend(prev, ['github-actions/http-4xx', 'github-actions/no-token'], t0))
+      .toEqual(['github-actions/no-token']);
   });
 
   it('re-sends after 24h so a long-running degradation is not forgotten', () => {
-    const prev = { keys: ['github-actions/no-token'], notifiedAt: t0.toISOString() };
-    expect(shouldSendNotices(prev, ['github-actions/no-token'], new Date('2026-09-09T00:00:00Z'))).toBe(true);
+    const prev = { 'github-actions/no-token': T0 };
+    expect(noticesToSend(prev, ['github-actions/no-token'], new Date('2026-09-09T00:00:00Z')))
+      .toEqual(['github-actions/no-token']);
   });
 
   it('sends nothing when there is nothing undetermined', () => {
-    expect(shouldSendNotices(null, [], t0)).toBe(false);
+    expect(noticesToSend({}, [], t0)).toEqual([]);
+  });
+});
+
+describe('nextNoticeState', () => {
+  const T0 = '2026-09-08T00:00:00Z';
+  const AT = '2026-09-08T06:00:00Z';
+
+  it('stamps sent keys, preserves quiet ones, and drops vanished ones', () => {
+    const prev = { 'github-actions/http-4xx': T0, 'github-actions/http-5xx': T0 };
+    const next = nextNoticeState(prev, ['github-actions/http-4xx', 'github-actions/no-token'],
+      ['github-actions/no-token'], AT);
+    expect(next).toEqual({ 'github-actions/http-4xx': T0, 'github-actions/no-token': AT });
+  });
+
+  it('does not restart the re-send clock for a key we stayed quiet about', () => {
+    // Re-stamping every hour would mean the 24h timer never elapses.
+    const prev = { 'github-actions/no-token': T0 };
+    expect(nextNoticeState(prev, ['github-actions/no-token'], [], AT))
+      .toEqual({ 'github-actions/no-token': T0 });
+  });
+});
+
+describe('jobsForKeys', () => {
+  it('selects only the jobs whose folded key was sent', () => {
+    const jobs = [
+      undet('a', 'github-actions', 'workflow list unavailable: HTTP 401'),
+      undet('b', 'github-actions', 'no GitHub token'),
+    ];
+    expect(jobsForKeys(jobs, ['github-actions/no-token']).map(j => j.id)).toEqual(['b']);
   });
 });
 
@@ -135,6 +170,23 @@ describe('carryOverJobs', () => {
     expect(carryOverJobs(prev, [], broken, new Map(), at)['gha|1'].notifiedAt).toBe('old');
   });
 
+  it('drops an entry for a workflow the user disabled on purpose', () => {
+    // Intentionally off is resolved, not frozen: otherwise a run-history failure
+    // on the same run carries the old alarm forever, and the next real failure
+    // after re-enabling would not read as new.
+    const prev = { 'gha|1': { status: 'failure' as const, notifiedAt: 'old', source: 'github-actions' as JobSource } };
+    const jobs = [mkJob('gha|1', 'github-actions', { state: 'disabled_manually',
+      lastRun: { status: 'unknown', fetchedAt: 'x', undeterminedReason: 'HTTP 500' } })];
+    expect(carryOverJobs(prev, jobs, avail, new Map(), at)).toEqual({});
+  });
+
+  it('does not keep an orphan entry just because the connector is degraded', () => {
+    // A degraded connector still emits its jobs, so a missing job really is gone.
+    const prev = { 'gha|1': { status: 'failure' as const, notifiedAt: 'old', source: 'github-actions' as JobSource } };
+    const degraded: Partial<Record<JobSource, Availability>> = { 'github-actions': { state: 'degraded', reason: 'no token' } };
+    expect(carryOverJobs(prev, [], degraded, new Map(), at)).toEqual({});
+  });
+
   it('keeps an entry when the connector went skipped, not just unavailable', () => {
     // cloudflare goes `skipped` when its token is absent and its jobs vanish
     // exactly as on a hard failure.
@@ -161,7 +213,7 @@ describe('notify-state migration', () => {
     await writeFile(p, JSON.stringify({ schemaVersion: 1,
       jobs: { 'systemd|x.timer': { status: 'failure', notifiedAt: 't' } } }), 'utf8');
     const st = await loadNotifyState(p);
-    expect(st.notices).toBeNull();
+    expect(st.notices).toEqual({});
     expect(st.jobs['systemd|x.timer'].source).toBe('systemd');
   });
 

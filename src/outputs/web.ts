@@ -31,9 +31,16 @@ export function serveSnapshot(getSnapshot: () => Promise<Snapshot>, port: number
     // Every request can trigger a scan (~15 GitHub API calls); /favicon.ico
     // must not double the cost.
     if (new URL(req.url ?? '/', 'http://localhost').pathname !== '/') { res.writeHead(404); res.end(); return; }
-    const html = renderHtml(await getSnapshot());
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(html);
+    try {
+      // getSnapshot now does network I/O and a disk write, so it can reject.
+      // An unhandled rejection here takes the whole `serve` process down.
+      const html = renderHtml(await getSnapshot());
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end(`scan failed: ${(e as Error).message}`);
+    }
   });
   server.listen(port);
   return server;

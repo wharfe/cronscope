@@ -41,8 +41,13 @@ export async function resolveRepoRef(ctx: Ctx, repoDir: string): Promise<GhRepoR
 }
 
 export type Fetched<T> = { ok: true; value: T } | { ok: false; reason: string };
-export type WorkflowState = 'active' | 'disabled_manually' | 'disabled_inactivity';
-export interface WorkflowInfo { id: number; state: WorkflowState }
+// GitHub also returns `disabled_fork` and `deleted`, and may add more. Anything
+// outside the three we act on becomes `other` and is reported as undetermined
+// rather than silently treated as active -- a `disabled_fork` workflow is one
+// GitHub has stopped, and calling it active would show a future nextRun for
+// something that will never fire.
+export type WorkflowState = 'active' | 'disabled_manually' | 'disabled_inactivity' | 'other';
+export interface WorkflowInfo { id: number; state: WorkflowState; rawState: string }
 export interface RunHistory {
   newest: { conclusion: string | null; createdAt: string } | null;
   medianGapHours?: number;
@@ -87,14 +92,28 @@ async function getJson(ctx: Ctx, url: string, token: string): Promise<Fetched<an
   }
 }
 
+const KNOWN_STATES = new Set(['active', 'disabled_manually', 'disabled_inactivity']);
+const MAX_WORKFLOW_PAGES = 5;
+
 export async function fetchWorkflows(ctx: Ctx, ref: GhRepoRef, token: string): Promise<Fetched<Map<string, WorkflowInfo>>> {
-  const got = await getJson(ctx, `${API}/repos/${ref.owner}/${ref.repo}/actions/workflows?per_page=100`, token);
-  if (!got.ok) return got;
   const map = new Map<string, WorkflowInfo>();
-  for (const w of got.value?.workflows ?? []) {
-    if (typeof w?.path !== 'string' || typeof w?.id !== 'number') continue;
-    const state: WorkflowState = w.state === 'disabled_manually' || w.state === 'disabled_inactivity' ? w.state : 'active';
-    map.set(w.path, { id: w.id, state });
+  let total = Infinity;
+  // Paginate: a repo with more than one page of workflows would otherwise leave
+  // the overflow looking like "not present in the listing" forever.
+  for (let page = 1; page <= MAX_WORKFLOW_PAGES && map.size < total; page++) {
+    const got = await getJson(ctx, `${API}/repos/${ref.owner}/${ref.repo}/actions/workflows?per_page=100&page=${page}`, token);
+    if (!got.ok) return got;
+    const list = got.value?.workflows;
+    // A 200 with an unexpected body must not read as "this repo has no
+    // workflows" -- that fails open into a clean-looking result.
+    if (!Array.isArray(list)) return { ok: false, reason: 'unexpected response shape (workflows)' };
+    total = typeof got.value.total_count === 'number' ? got.value.total_count : map.size + list.length;
+    for (const w of list) {
+      if (typeof w?.path !== 'string' || typeof w?.id !== 'number') continue;
+      const rawState = typeof w.state === 'string' ? w.state : '';
+      map.set(w.path, { id: w.id, state: KNOWN_STATES.has(rawState) ? rawState as WorkflowState : 'other', rawState });
+    }
+    if (list.length === 0) break;
   }
   return { ok: true, value: map };
 }
@@ -111,7 +130,11 @@ export async function fetchScheduledRuns(ctx: Ctx, ref: GhRepoRef, workflowId: n
   const url = `${API}/repos/${ref.owner}/${ref.repo}/actions/workflows/${workflowId}/runs?event=schedule&status=completed&per_page=10`;
   const got = await getJson(ctx, url, token);
   if (!got.ok) return got;
-  const raw: any[] = got.value?.workflow_runs ?? [];
+  const raw = got.value?.workflow_runs;
+  // Same fail-open guard as the workflow listing: a 200 whose body is not the
+  // shape we expect would otherwise become "this workflow never ran", which
+  // reads as healthy and drops any standing alarm.
+  if (!Array.isArray(raw)) return { ok: false, reason: 'unexpected response shape (workflow_runs)' };
   // The API returns newest-first in practice but does not promise it, and a
   // re-run keeps its original created_at. Sort explicitly: an out-of-order page
   // would pick the wrong `newest` and make every gap negative.
@@ -126,10 +149,23 @@ export async function fetchScheduledRuns(ctx: Ctx, ref: GhRepoRef, workflowId: n
   // schedules hard (measured: */15 firing every 4.4h), so there is no honest
   // window to derive from a declared cron yet. Stored to calibrate one later
   // (wharfe/cronscope#3).
+  const newest = runs[0];
+  let conclusion: string | null = newest.conclusion ?? null;
+  // A re-run does NOT get a new run: GitHub adds an attempt to the same run and
+  // the event stays `schedule`. So the listing's conclusion is the re-run's,
+  // and a manual re-run that went green would hide the scheduled slot that
+  // failed -- the exact masking `event=schedule` was chosen to prevent. Ask for
+  // the first attempt, which is the scheduled slot's own outcome.
+  if (typeof newest.run_attempt === 'number' && newest.run_attempt > 1 && typeof newest.id === 'number') {
+    const first = await getJson(ctx, `${API}/repos/${ref.owner}/${ref.repo}/actions/runs/${newest.id}/attempts/1`, token);
+    if (!first.ok) return { ok: false, reason: `first attempt of the newest scheduled run unavailable: ${first.reason}` };
+    if (typeof first.value?.conclusion === 'undefined') return { ok: false, reason: 'unexpected response shape (run attempt)' };
+    conclusion = first.value.conclusion ?? null;
+  }
   return {
     ok: true,
     value: {
-      newest: { conclusion: runs[0].conclusion ?? null, createdAt: runs[0].created_at },
+      newest: { conclusion, createdAt: newest.created_at },
       samples: runs.length,
       ...(gaps.length ? { medianGapHours: median(gaps), maxGapHours: Math.max(...gaps) } : {}),
     },

@@ -9,7 +9,10 @@ export interface NotifyState {
   schemaVersion: 1;
   lastCheckAt?: string;
   jobs: Record<string, { status: 'failure' | 'overdue'; notifiedAt: string; source: JobSource }>;
-  notices: { keys: string[]; notifiedAt: string } | null;
+  // key -> when that key was last sent to Slack. Per key, not one timestamp for
+  // the set: with a shared timestamp, one class recovering changes the set and
+  // re-sends the classes that did not change, so a flapping reason alarms hourly.
+  notices: Record<string, string>;
 }
 
 const RESEND_AFTER_MS = 24 * 60 * 60 * 1000;
@@ -52,15 +55,31 @@ export function noticeKeys(jobs: Job[]): string[] {
   return [...keys].sort();
 }
 
-export function shouldSendNotices(
+// The keys worth sending right now: ones never sent, plus ones standing long
+// enough to be worth repeating. A token that expired three weeks ago must not be
+// invisible just because its notice was posted once.
+export function noticesToSend(
   prev: NotifyState['notices'], keys: string[], now: Date, resendAfterMs = RESEND_AFTER_MS,
-): boolean {
-  if (keys.length === 0) return false;
-  if (!prev) return true;
-  if (prev.keys.join('|') !== keys.join('|')) return true;
-  // Re-send periodically: a token that expired three weeks ago must not be
-  // invisible just because its notice was posted once.
-  return now.getTime() - new Date(prev.notifiedAt).getTime() >= resendAfterMs;
+): string[] {
+  return keys.filter((k) => {
+    const at = prev?.[k];
+    return !at || now.getTime() - new Date(at).getTime() >= resendAfterMs;
+  });
+}
+
+export function nextNoticeState(
+  prev: NotifyState['notices'], keys: string[], sent: string[], at: string,
+): NotifyState['notices'] {
+  const next: NotifyState['notices'] = {};
+  // Keys that vanished are dropped; keys we stayed quiet about keep their old
+  // timestamp so the re-send clock keeps running instead of restarting hourly.
+  for (const k of keys) next[k] = sent.includes(k) ? at : (prev?.[k] ?? at);
+  return next;
+}
+
+export function jobsForKeys(jobs: Job[], keys: string[]): Job[] {
+  return jobs.filter((j) => isUndetermined(j)
+    && keys.includes(`${j.source}/${classifyReason(j.lastRun!.undeterminedReason!)}`));
 }
 
 export function carryOverJobs(
@@ -72,15 +91,21 @@ export function carryOverJobs(
 ): NotifyState['jobs'] {
   const undetermined = new Set(jobs.filter(isUndetermined).map((j) => j.id));
   const present = new Set(jobs.map((j) => j.id));
+  // A workflow the user switched off is resolved, not frozen. Without this, a
+  // run-history failure on the same run would carry the old alarm forever and
+  // the next real failure after re-enabling would not read as new.
+  const intentionallyOff = new Set(jobs.filter((j) => j.state === 'disabled_manually').map((j) => j.id));
   const next: NotifyState['jobs'] = {};
   for (const [id, entry] of Object.entries(prev)) {
     // Keep what we could not read this run: either the job said so, or its
-    // whole connector fell over and took its jobs out of the snapshot. Any
-    // non-available state counts -- cloudflare goes `skipped` without a token
-    // and its jobs vanish exactly as on a hard failure. `degraded` connectors
-    // still emit jobs, so this is a no-op for them.
-    const connectorDown = !present.has(id) && connectors[entry.source]?.state !== 'available';
-    if (undetermined.has(id) || connectorDown) next[id] = entry;
+    // whole connector fell over and took its jobs out of the snapshot.
+    // cloudflare goes `skipped` without a token and its jobs vanish exactly as
+    // on a hard failure, so that counts too. `degraded` does NOT: such a
+    // connector still emits its jobs, so a job missing from the snapshot
+    // really is gone.
+    const st = connectors[entry.source]?.state;
+    const connectorDown = !present.has(id) && st !== 'available' && st !== 'degraded';
+    if ((undetermined.has(id) || connectorDown) && !intentionallyOff.has(id)) next[id] = entry;
   }
   for (const [id, status] of current) {
     // `current` is built from these same jobs, so the lookup always hits; the
@@ -103,10 +128,14 @@ export async function loadNotifyState(path: string): Promise<NotifyState> {
         if (!source) continue;                     // unknown prefix -> drop, do not mislabel
         jobs[id] = { status: e.status, notifiedAt: e.notifiedAt, source };
       }
-      return { schemaVersion: 1, lastCheckAt: data.lastCheckAt, jobs, notices: data.notices ?? null };
+      const rawNotices = data.notices;
+      // Older shapes: absent, null, or the {keys,notifiedAt} form this replaced.
+      const notices: NotifyState['notices'] = rawNotices && !Array.isArray(rawNotices) && !rawNotices.keys
+        ? rawNotices : {};
+      return { schemaVersion: 1, lastCheckAt: data.lastCheckAt, jobs, notices };
     }
   } catch { /* fall through */ }
-  return { schemaVersion: 1, jobs: {}, notices: null };
+  return { schemaVersion: 1, jobs: {}, notices: {} };
 }
 
 export async function saveNotifyState(path: string, state: NotifyState): Promise<void> {

@@ -38,7 +38,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "vitest run",
+    "test": "vitest run && tsc -p tsconfig.test.json --noEmit",
     "dev": "tsx src/cli.ts",
     "prepublishOnly": "rm -rf dist && npm run build && npm test"
   },

@@ -98,7 +98,8 @@ describe('fetchWorkflows', () => {
     const got = await fetchWorkflows(c, REF, TOKEN);
     expect(got.ok).toBe(true);
     if (!got.ok) return;
-    expect(got.value.get('.github/workflows/uptime.yml')).toEqual({ id: 247794286, state: 'disabled_inactivity' });
+    expect(got.value.get('.github/workflows/uptime.yml')).toEqual(
+      { id: 247794286, state: 'disabled_inactivity', rawState: 'disabled_inactivity' });
   });
 
   it('reports a non-2xx response as not-ok instead of an empty map', async () => {
@@ -171,5 +172,100 @@ describe('fetchScheduledRuns', () => {
   it('returns ok with a null newest when the workflow never ran on schedule', async () => {
     const c = ctx({ fetch: fetchStub({ '/runs': { body: { workflow_runs: [] } } }) });
     expect(await fetchScheduledRuns(c, REF, 42, TOKEN)).toEqual({ ok: true, value: { newest: null, samples: 0 } });
+  });
+});
+
+describe('malformed 200 responses must not read as empty', () => {
+  it('rejects a workflow listing whose body is not the expected shape', async () => {
+    // A 200 with `{}` would otherwise become an empty map, which the connector
+    // reports as "workflow not present" -- plausible, and wrong.
+    const c = ctx({ fetch: fetchStub({ '/actions/workflows': { body: {} } }) });
+    const got = await fetchWorkflows(c, REF, TOKEN);
+    expect(got.ok).toBe(false);
+    if (got.ok) return;
+    expect(got.reason).toContain('workflows');
+  });
+
+  it('rejects a runs response whose body is not the expected shape', async () => {
+    // This is the fail-open path: an empty array becomes status 'never', which
+    // carries no undeterminedReason, so nothing is reported AND any standing
+    // failure is dropped as recovered.
+    const c = ctx({ fetch: fetchStub({ '/runs': { body: { total_count: 3 } } }) });
+    const got = await fetchScheduledRuns(c, REF, 42, TOKEN);
+    expect(got.ok).toBe(false);
+    if (got.ok) return;
+    expect(got.reason).toContain('workflow_runs');
+  });
+});
+
+describe('re-run attempts', () => {
+  it('judges the scheduled slot on its first attempt, not the re-run', async () => {
+    // A re-run adds an attempt to the SAME run and keeps event=schedule, so the
+    // listing shows the re-run's conclusion. Taking it would let a manual re-run
+    // hide the scheduled failure -- exactly what event=schedule was meant to stop.
+    const urls: string[] = [];
+    const c = ctx({ fetch: (async (url: string) => {
+      urls.push(String(url));
+      const attempt = String(url).includes('/attempts/1');
+      return { ok: true, status: 200, json: async () => attempt
+        ? { conclusion: 'failure' }
+        : { workflow_runs: [{ id: 999, run_attempt: 2, conclusion: 'success', created_at: '2026-09-08T00:00:00Z' }] } };
+    }) as unknown as typeof fetch });
+    const got = await fetchScheduledRuns(c, REF, 42, TOKEN);
+    expect(got.ok).toBe(true);
+    if (!got.ok) return;
+    expect(got.value.newest?.conclusion).toBe('failure');
+    expect(urls.some((u) => u.includes('/runs/999/attempts/1'))).toBe(true);
+  });
+
+  it('does not spend an extra request when the newest run is a first attempt', async () => {
+    let calls = 0;
+    const c = ctx({ fetch: (async () => {
+      calls++;
+      return { ok: true, status: 200, json: async () => ({ workflow_runs: [
+        { id: 1, run_attempt: 1, conclusion: 'success', created_at: '2026-09-08T00:00:00Z' }] }) };
+    }) as unknown as typeof fetch });
+    await fetchScheduledRuns(c, REF, 42, TOKEN);
+    expect(calls).toBe(1);
+  });
+
+  it('reports undetermined when the first attempt cannot be read', async () => {
+    const c = ctx({ fetch: (async (url: string) => String(url).includes('/attempts/1')
+      ? { ok: false, status: 500, json: async () => ({}) }
+      : { ok: true, status: 200, json: async () => ({ workflow_runs: [
+          { id: 999, run_attempt: 3, conclusion: 'success', created_at: '2026-09-08T00:00:00Z' }] }) }
+    ) as unknown as typeof fetch });
+    const got = await fetchScheduledRuns(c, REF, 42, TOKEN);
+    expect(got.ok).toBe(false);
+    if (got.ok) return;
+    expect(got.reason).toContain('first attempt');
+  });
+});
+
+describe('workflow state mapping', () => {
+  it('does not pass an unrecognised state off as active', async () => {
+    // disabled_fork and deleted are real GitHub states. Calling them active
+    // would show a future nextRun for something that will never fire.
+    const c = ctx({ fetch: fetchStub({ '/actions/workflows': { body: { total_count: 1, workflows: [
+      { id: 1, path: '.github/workflows/x.yml', state: 'disabled_fork' }] } } }) });
+    const got = await fetchWorkflows(c, REF, TOKEN);
+    expect(got.ok).toBe(true);
+    if (!got.ok) return;
+    expect(got.value.get('.github/workflows/x.yml')).toEqual({ id: 1, state: 'other', rawState: 'disabled_fork' });
+  });
+
+  it('follows pagination so workflows past the first page are not lost', async () => {
+    const pages: Record<string, any> = {
+      'page=1': { total_count: 2, workflows: [{ id: 1, path: '.github/workflows/a.yml', state: 'active' }] },
+      'page=2': { total_count: 2, workflows: [{ id: 2, path: '.github/workflows/b.yml', state: 'active' }] },
+    };
+    const c = ctx({ fetch: (async (url: string) => ({
+      ok: true, status: 200,
+      json: async () => pages[String(url).includes('page=2') ? 'page=2' : 'page=1'],
+    })) as unknown as typeof fetch });
+    const got = await fetchWorkflows(c, REF, TOKEN);
+    expect(got.ok).toBe(true);
+    if (!got.ok) return;
+    expect([...got.value.keys()]).toEqual(['.github/workflows/a.yml', '.github/workflows/b.yml']);
   });
 });

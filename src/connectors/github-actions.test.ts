@@ -60,9 +60,12 @@ function apiCtx(files: Record<string, string>, over: Partial<Ctx> = {}): Ctx {
   return {
     ...ctx(files),
     env: { CRONSCOPE_GH_TOKEN: 'ghp_dummy_token_0123456789' },
-    run: async (cmd) => cmd[0] === 'git'
-      ? { stdout: 'https://github.com/wharfe/proj.git\n', stderr: '', code: 0 }
-      : { stdout: '', stderr: '', code: 1 },
+    run: async (cmd) => {
+      if (cmd[0] !== 'git') return { stdout: '', stderr: '', code: 1 };
+      // The workflow file must sit at the repo root; rev-parse is what proves it.
+      if (cmd.includes('rev-parse')) return { stdout: '/home/u/dev/proj\n', stderr: '', code: 0 };
+      return { stdout: 'https://github.com/wharfe/proj.git\n', stderr: '', code: 0 };
+    },
     ...over,
   };
 }
@@ -176,5 +179,41 @@ describe('github-actions connector (API-backed)', () => {
     });
     await githubActionsConnector.discover(c);
     expect(listCalls).toBe(1);
+  });
+});
+
+describe('github-actions connector: states GitHub can report', () => {
+  it('does not alarm on a neutral conclusion, but does not call it success either', async () => {
+    // GitHub treats neutral as non-failing; branch protection passes on it.
+    const c = apiCtx({ [WF_PATH]: WORKFLOW }, {
+      fetch: ghFetch(ACTIVE, [{ conclusion: 'neutral', created_at: '2026-06-11T21:00:00Z' }]) });
+    const j = (await githubActionsConnector.discover(c))[0];
+    expect(j.lastRun?.status).toBe('unknown');
+    expect(j.lastRun?.undeterminedReason).toContain('neutral');
+  });
+
+  it('reports an unrecognised workflow state instead of treating it as active', async () => {
+    const c = apiCtx({ [WF_PATH]: WORKFLOW }, {
+      fetch: ghFetch([{ id: 7, path: '.github/workflows/daily.yml', state: 'disabled_fork' }], []) });
+    const j = (await githubActionsConnector.discover(c))[0];
+    expect(j.state).toBeUndefined();
+    expect(j.lastRun?.undeterminedReason).toContain('disabled_fork');
+    // GitHub has stopped it, so promising a next run would be a lie.
+    expect(j.schedule.nextRun).toBeUndefined();
+  });
+
+  it('emits no job for a workflow file that is not at the repository root', async () => {
+    // GitHub only runs .github/workflows at the repo root, but `git -C` walks
+    // up -- so this file would otherwise borrow the parent repo's run history.
+    const nested = '/home/u/dev/proj/examples/.github/workflows/daily.yml';
+    const c = apiCtx({ [nested]: WORKFLOW }, {
+      run: async (cmd) => {
+        if (cmd[0] !== 'git') return { stdout: '', stderr: '', code: 1 };
+        if (cmd.includes('rev-parse')) return { stdout: '/home/u/dev/proj\n', stderr: '', code: 0 };
+        return { stdout: 'https://github.com/wharfe/proj.git\n', stderr: '', code: 0 };
+      },
+      fetch: ghFetch(ACTIVE, [{ conclusion: 'failure', created_at: '2026-06-11T21:00:00Z' }]),
+    });
+    expect(await githubActionsConnector.discover(c)).toEqual([]);
   });
 });
