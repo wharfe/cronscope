@@ -55,3 +55,200 @@ describe('github-actions connector', () => {
     expect(jobs.map((j) => j.location)).toEqual(['org/repo/.github/workflows/ci.yml']);
   });
 });
+
+function apiCtx(files: Record<string, string>, over: Partial<Ctx> = {}): Ctx {
+  return {
+    ...ctx(files),
+    env: { CRONSCOPE_GH_TOKEN: 'ghp_dummy_token_0123456789' },
+    run: async (cmd) => {
+      if (cmd[0] !== 'git') return { stdout: '', stderr: '', code: 1 };
+      // The workflow file must sit at the repo root; rev-parse is what proves it.
+      if (cmd.includes('rev-parse')) return { stdout: '/home/u/dev/proj\n', stderr: '', code: 0 };
+      return { stdout: 'https://github.com/wharfe/proj.git\n', stderr: '', code: 0 };
+    },
+    ...over,
+  };
+}
+
+function ghFetch(workflows: any[], runs: any[]): typeof fetch {
+  return (async (url: string) => ({
+    ok: true, status: 200,
+    json: async () => String(url).includes('/runs') ? { workflow_runs: runs } : { workflows },
+  })) as unknown as typeof fetch;
+}
+
+const WF_PATH = '/home/u/dev/proj/.github/workflows/daily.yml';
+const ACTIVE = [{ id: 7, path: '.github/workflows/daily.yml', state: 'active' }];
+
+describe('github-actions connector (API-backed)', () => {
+  it('is degraded, not unavailable, when no token can be resolved', async () => {
+    expect((await githubActionsConnector.availability(ctx({}))).state).toBe('degraded');
+  });
+
+  it('keeps discovering every workflow when degraded, with a reason', async () => {
+    const jobs = await githubActionsConnector.discover(ctx({ [WF_PATH]: WORKFLOW }));
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].lastRun?.status).toBe('unknown');
+    expect(jobs[0].lastRun?.undeterminedReason).toBeTruthy();
+  });
+
+  it('fills lastRun from the newest completed scheduled run', async () => {
+    const c = apiCtx({ [WF_PATH]: WORKFLOW }, {
+      fetch: ghFetch(ACTIVE, [{ id: 1, run_attempt: 1, conclusion: 'failure', created_at: '2026-06-11T21:00:00Z' }]) });
+    const jobs = await githubActionsConnector.discover(c);
+    expect(jobs[0].lastRun?.status).toBe('failure');
+    expect(jobs[0].lastRun?.at).toBe('2026-06-11T21:00:00.000Z');
+    expect(jobs[0].state).toBe('active');
+  });
+
+  it('treats cancelled as a failure', async () => {
+    const c = apiCtx({ [WF_PATH]: WORKFLOW }, {
+      fetch: ghFetch(ACTIVE, [{ id: 1, run_attempt: 1, conclusion: 'cancelled', created_at: '2026-06-11T21:00:00Z' }]) });
+    expect((await githubActionsConnector.discover(c))[0].lastRun?.status).toBe('failure');
+  });
+
+  it('treats skipped as undetermined, with a reason', async () => {
+    const c = apiCtx({ [WF_PATH]: WORKFLOW }, {
+      fetch: ghFetch(ACTIVE, [{ id: 1, run_attempt: 1, conclusion: 'skipped', created_at: '2026-06-11T21:00:00Z' }]) });
+    const j = (await githubActionsConnector.discover(c))[0];
+    expect(j.lastRun?.status).toBe('unknown');
+    expect(j.lastRun?.undeterminedReason).toContain('skipped');
+  });
+
+  it('marks a disabled workflow and suppresses its future nextRun', async () => {
+    const c = apiCtx({ [WF_PATH]: WORKFLOW }, {
+      fetch: ghFetch([{ id: 7, path: '.github/workflows/daily.yml', state: 'disabled_inactivity' }],
+        [{ id: 1, run_attempt: 1, conclusion: 'success', created_at: '2026-06-01T21:00:00Z' }]) });
+    const j = (await githubActionsConnector.discover(c))[0];
+    expect(j.state).toBe('disabled_inactivity');
+    expect(j.schedule.nextRun).toBeUndefined();
+    expect(j.schedule.nextRunSource).toBe('unknown');
+  });
+
+  it('reports never when the workflow has no scheduled run yet', async () => {
+    const c = apiCtx({ [WF_PATH]: WORKFLOW }, { fetch: ghFetch(ACTIVE, []) });
+    expect((await githubActionsConnector.discover(c))[0].lastRun?.status).toBe('never');
+  });
+
+  it('leaves status unknown with a reason when the API fails, never success', async () => {
+    const c = apiCtx({ [WF_PATH]: WORKFLOW }, {
+      fetch: (async () => ({ ok: false, status: 401, json: async () => ({}) })) as unknown as typeof fetch });
+    const j = (await githubActionsConnector.discover(c))[0];
+    expect(j.lastRun?.status).toBe('unknown');
+    expect(j.lastRun?.undeterminedReason).toContain('401');
+  });
+
+  it('leaves status unknown with a reason when the checkout has no GitHub origin', async () => {
+    const c = apiCtx({ [WF_PATH]: WORKFLOW }, { run: async () => ({ stdout: '', stderr: '', code: 1 }) });
+    const j = (await githubActionsConnector.discover(c))[0];
+    expect(j.lastRun?.status).toBe('unknown');
+    expect(j.lastRun?.undeterminedReason).toContain('origin');
+  });
+
+  it('records observed gap statistics without judging on them', async () => {
+    const c = apiCtx({ [WF_PATH]: WORKFLOW }, { fetch: ghFetch(ACTIVE, [
+      { id: 1, run_attempt: 1, conclusion: 'success', created_at: '2026-06-12T00:00:00Z' },
+      { id: 1, run_attempt: 1, conclusion: 'success', created_at: '2026-06-11T00:00:00Z' },
+    ]) });
+    expect((await githubActionsConnector.discover(c))[0].observed).toEqual(
+      { samples: 2, medianGapHours: 24, maxGapHours: 24 });
+  });
+
+  it('emits one job for a workflow with several cron entries', async () => {
+    const two = `name: two\non:\n  schedule:\n    - cron: "0 0 * * *"\n    - cron: "0 12 * * *"\njobs: {}\n`;
+    const c = apiCtx({ [WF_PATH]: two }, { fetch: ghFetch(ACTIVE, []) });
+    const jobs = await githubActionsConnector.discover(c);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].schedule.raw).toBe('0 0 * * *, 0 12 * * *');
+  });
+
+  it('queries each repo once even with several workflows', async () => {
+    let listCalls = 0;
+    const c = apiCtx({
+      '/home/u/dev/proj/.github/workflows/a.yml': WORKFLOW,
+      '/home/u/dev/proj/.github/workflows/b.yml': WORKFLOW,
+    }, {
+      fetch: (async (url: string) => {
+        if (!String(url).includes('/runs')) listCalls++;
+        return { ok: true, status: 200, json: async () => String(url).includes('/runs')
+          ? { workflow_runs: [] }
+          : { workflows: [
+              { id: 1, path: '.github/workflows/a.yml', state: 'active' },
+              { id: 2, path: '.github/workflows/b.yml', state: 'active' }] } };
+      }) as unknown as typeof fetch,
+    });
+    await githubActionsConnector.discover(c);
+    expect(listCalls).toBe(1);
+  });
+});
+
+describe('github-actions connector: states GitHub can report', () => {
+  it('does not alarm on a neutral conclusion, but does not call it success either', async () => {
+    // GitHub treats neutral as non-failing; branch protection passes on it.
+    const c = apiCtx({ [WF_PATH]: WORKFLOW }, {
+      fetch: ghFetch(ACTIVE, [{ id: 1, run_attempt: 1, conclusion: 'neutral', created_at: '2026-06-11T21:00:00Z' }]) });
+    const j = (await githubActionsConnector.discover(c))[0];
+    expect(j.lastRun?.status).toBe('unknown');
+    expect(j.lastRun?.undeterminedReason).toContain('neutral');
+  });
+
+  it('reports an unrecognised workflow state instead of treating it as active', async () => {
+    const c = apiCtx({ [WF_PATH]: WORKFLOW }, {
+      fetch: ghFetch([{ id: 7, path: '.github/workflows/daily.yml', state: 'disabled_fork' }], []) });
+    const j = (await githubActionsConnector.discover(c))[0];
+    expect(j.state).toBeUndefined();
+    expect(j.lastRun?.undeterminedReason).toContain('disabled_fork');
+    // GitHub has stopped it, so promising a next run would be a lie.
+    expect(j.schedule.nextRun).toBeUndefined();
+  });
+
+  it('emits no job for a workflow file that is not at the repository root', async () => {
+    // GitHub only runs .github/workflows at the repo root, but `git -C` walks
+    // up -- so this file would otherwise borrow the parent repo's run history.
+    const nested = '/home/u/dev/proj/examples/.github/workflows/daily.yml';
+    const c = apiCtx({ [nested]: WORKFLOW }, {
+      run: async (cmd) => {
+        if (cmd[0] !== 'git') return { stdout: '', stderr: '', code: 1 };
+        if (cmd.includes('rev-parse')) return { stdout: '/home/u/dev/proj\n', stderr: '', code: 0 };
+        return { stdout: 'https://github.com/wharfe/proj.git\n', stderr: '', code: 0 };
+      },
+      fetch: ghFetch(ACTIVE, [{ id: 1, run_attempt: 1, conclusion: 'failure', created_at: '2026-06-11T21:00:00Z' }]),
+    });
+    expect(await githubActionsConnector.discover(c)).toEqual([]);
+  });
+});
+
+describe('a workflow file we cannot read', () => {
+  const BROKEN = 'name: x\non:\n  schedule:\n    - cron: "0 0 * * *"\n  bad: [unclosed\n';
+
+  it('still emits a job, with the reason, instead of dropping it from the snapshot', async () => {
+    // Dropping it reads as "recovered" to the notify state, so a workflow whose
+    // file broke would take its standing alarm with it -- and a broken workflow
+    // is exactly the one worth watching.
+    const c = apiCtx({ [WF_PATH]: BROKEN }, { fetch: ghFetch(ACTIVE, []) });
+    const jobs = await githubActionsConnector.discover(c);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].lastRun?.status).toBe('unknown');
+    expect(jobs[0].lastRun?.undeterminedReason).toContain('could not be read or parsed');
+    expect(jobs[0].schedule.nextRun).toBeUndefined();
+  });
+
+  it('keeps the same job id as when the file parsed, so the alarm survives', async () => {
+    const good = await githubActionsConnector.discover(
+      apiCtx({ [WF_PATH]: WORKFLOW }, { fetch: ghFetch(ACTIVE, []) }));
+    const broken = await githubActionsConnector.discover(
+      apiCtx({ [WF_PATH]: BROKEN }, { fetch: ghFetch(ACTIVE, []) }));
+    expect(broken[0].id).toBe(good[0].id);
+  });
+});
+
+it('never puts the parser diagnostic into the reason that gets persisted and posted', async () => {
+  // A YAML parse error quotes the offending source line. That string reaches
+  // the snapshot and Slack, so a token written into a broken workflow file
+  // would ride along with it.
+  const withSecret = 'on:\n  schedule:\n    - cron: "0 0 * * *"\n  token: ghp_MUSTNOTLEAK_0123456789\n  bad: [unclosed\n';
+  const c = apiCtx({ [WF_PATH]: withSecret }, { fetch: ghFetch(ACTIVE, []) });
+  const j = (await githubActionsConnector.discover(c))[0];
+  expect(j.lastRun?.undeterminedReason).toBe('workflow file could not be read or parsed');
+  expect(JSON.stringify(j)).not.toContain('ghp_MUSTNOTLEAK');
+});

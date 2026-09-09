@@ -1,6 +1,6 @@
 {
   "name": "cronscope",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Cross-surface discovery and monitoring of scheduled jobs (crontab, systemd, GitHub Actions, Cloudflare) from one CLI.",
   "keywords": [
     "cron",
@@ -31,14 +31,14 @@
     "dist"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=18.11"
   },
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "vitest run",
+    "test": "vitest run && tsc -p tsconfig.test.json --noEmit",
     "dev": "tsx src/cli.ts",
     "prepublishOnly": "rm -rf dist && npm run build && npm test"
   },

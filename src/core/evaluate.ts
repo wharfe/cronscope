@@ -1,10 +1,9 @@
 import type { Job } from '../types.js';
 import { cronPrev } from './schedule.js';
+import { ALARMABLE } from './sources.js';
 
 export interface EvalCtx { now: Date; bootAt?: string; graceMinutes: number; }
 export interface EvalResult { failures: Job[]; overdues: Job[]; }
-
-const STATUS_BEARING = new Set(['systemd', 'cloudflare', 'hermes', 'crontab']);
 
 // The relevant scheduled instant that should already have fired. Prefer the
 // source-authoritative nextRun (the scheduler's own next fire — it goes stale
@@ -30,9 +29,23 @@ export function evaluate(jobs: Job[], ctx: EvalCtx): EvalResult {
   const boot = ctx.bootAt ? new Date(ctx.bootAt) : undefined;
 
   for (const job of jobs) {
-    if (!STATUS_BEARING.has(job.source)) continue; // unknown-status sources are display-only
+    if (!ALARMABLE.has(job.source)) continue; // display-only sources
+
+    // A workflow the user switched off on purpose is not an incident.
+    if (job.state === 'disabled_manually') continue;
+
+    // GitHub already told us the schedule is off. That is the conclusion --
+    // no run history is needed, and none may exist once retention expires.
+    if (job.state === 'disabled_inactivity') { overdues.push(job); continue; }
 
     if (job.lastRun?.status === 'failure') { failures.push(job); continue; }
+
+    // GitHub's scheduler does not honour the declared cron (measured
+    // 2026-09-08: a */15 workflow firing every 4.4h), so a missed-slot window
+    // computed from it yields either permanent silence or permanent noise.
+    // Silence for an *active* GHA workflow is out of scope until there is data
+    // to calibrate a window on (#3).
+    if (job.source === 'github-actions') continue;
 
     const scheduled = scheduledInstant(job, ctx.now);
     if (!scheduled) continue;                                          // no usable schedule -> not overdue

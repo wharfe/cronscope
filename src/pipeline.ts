@@ -8,7 +8,7 @@ export async function runScan(connectors: Connector[], ctx: Ctx, bootAt: string 
     try { avail = await c.availability(ctx); }
     catch (e) { avail = { state: 'unavailable', reason: String((e as Error).message) }; }
     connState[c.id] = avail;
-    if (avail.state !== 'available') continue;
+    if (avail.state === 'unavailable' || avail.state === 'skipped') continue;
     try { jobs.push(...await c.discover(ctx)); }
     catch (e) { connState[c.id] = { state: 'unavailable', reason: String((e as Error).message) }; }
   }
