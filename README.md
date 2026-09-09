@@ -32,7 +32,7 @@ npx cronscope check         # fail/overdue を Slack 通知（systemd timer で�
 | 0 | hermes | [Hermes Agent](https://github.com/NousResearch/hermes-agent) の `~/.hermes/cron/jobs.json` を読み、last-run 成否・次回実行を取得 | 不要 |
 | 1 | cloudflare | API で Workers cron triggers を列挙（BYOK） | API token |
 
-github-actions は token があれば fail 検知の対象になる。判定は `event=schedule` の run だけを見るので、**手動再実行の成功が定時実行の失敗を隠さない**。GitHub が無操作により schedule を無効化した状態（`disabled_inactivity`）も検知する。人が意図的に止めた `disabled_manually` は表示のみで通知しない。
+github-actions は token があれば fail 検知の対象になる。判定は `event=schedule` の run だけを見るので手動実行（`workflow_dispatch`）は数えない。ただし**再実行（re-run）は新しい run を作らず同じ run に attempt を足すだけで event も `schedule` のまま**なので、それだけでは足りない — `run_attempt > 1` のときは attempt 1 を引き、**定時の枠それ自体の成否**で判定する。GitHub が無操作により schedule を無効化した状態（`disabled_inactivity`）も検知する。人が意図的に止めた `disabled_manually` は表示のみで通知しない。
 
 一方、**workflow が有効なまま GitHub が静かに発火を止めた場合は検知しない**。GitHub の scheduler は宣言した cron どおりに走らず（実測 2026-09-08: `*/15` 宣言の workflow の実発火間隔は中央値 4.4 時間、宣言の 1/18）、宣言周期から沈黙の窓を作ると誤検知か永久沈黙のどちらかになる。観測した発火間隔は snapshot に記録しており、実例が出た時点で実データから窓を決める（[#3](https://github.com/wharfe/cronscope/issues/3)）。
 
