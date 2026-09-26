@@ -47,6 +47,17 @@ export function evaluate(jobs: Job[], ctx: EvalCtx): EvalResult {
     // to calibrate a window on (#3).
     if (job.source === 'github-actions') continue;
 
+    // launchd on a Mac that sleeps: DarkWake cycles, coalesced fires on wake and
+    // long runs make a slot-exact window noisy, so launchd gets a coarse one
+    // instead -- no start for (max gap + 24h). No window, or no run ever seen,
+    // means no conclusion. See docs/specs/2026-09-26-launchd-connector.md.
+    if (job.source === 'launchd') {
+      const gap = job.schedule.maxGapSeconds;
+      const anchor = job.lastRun?.startedAt ?? job.lastRun?.at;
+      if (gap && anchor && ctx.now.getTime() - new Date(anchor).getTime() > (gap + 86_400) * 1000) overdues.push(job);
+      continue;
+    }
+
     const scheduled = scheduledInstant(job, ctx.now);
     if (!scheduled) continue;                                          // no usable schedule -> not overdue
     if (job.source === 'crontab') {

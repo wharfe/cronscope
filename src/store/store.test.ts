@@ -227,6 +227,13 @@ describe('notify-state migration', () => {
     expect(st.jobs['systemd|x.timer'].source).toBe('systemd');
   });
 
+  it('keeps a launchd entry written without a source field (I6)', async () => {
+    const p = join(dir, 'launchd.json');
+    await writeFile(p, JSON.stringify({ schemaVersion: 1,
+      jobs: { 'launchd|com.wharfe.local-schedules.x': { status: 'failure', notifiedAt: 't' } } }), 'utf8');
+    expect((await loadNotifyState(p)).jobs['launchd|com.wharfe.local-schedules.x']?.source).toBe('launchd');
+  });
+
   it('drops an entry whose id prefix is not a known connector rather than mislabelling it', async () => {
     const p = join(dir, 'weird.json');
     await writeFile(p, JSON.stringify({ schemaVersion: 1,

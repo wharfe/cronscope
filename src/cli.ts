@@ -12,13 +12,14 @@ import { systemdConnector } from './connectors/systemd.js';
 import { githubActionsConnector } from './connectors/github-actions.js';
 import { cloudflareConnector } from './connectors/cloudflare.js';
 import { hermesConnector } from './connectors/hermes.js';
+import { launchdConnector } from './connectors/launchd.js';
 import { loadNotifyState, saveNotifyState, noticeKeys, noticesToSend, nextNoticeState, jobsForKeys, carryOverJobs } from './store/notify-state.js';
 import { saveSnapshot } from './store/snapshot.js';
 import { evaluate } from './core/evaluate.js';
 import { formatDigest, sendSlack, undeterminedNotices } from './outputs/slack.js';
 import { serveSnapshot } from './outputs/web.js';
 
-const CONNECTORS = [crontabConnector, systemdConnector, githubActionsConnector, cloudflareConnector, hermesConnector];
+const CONNECTORS = [crontabConnector, systemdConnector, githubActionsConnector, cloudflareConnector, hermesConnector, launchdConnector];
 const CFG_DIR = join(homedir(), '.config', 'cronscope');
 const SNAP_PATH = join(CFG_DIR, 'state.json');
 const NOTIFY_PATH = join(CFG_DIR, 'notify-state.json');
@@ -43,7 +44,10 @@ async function main() {
     const { snap } = await doScan();
     for (const j of snap.jobs) {
       const flag = j.state && j.state !== 'active' ? `  (${j.state})` : '';
-      console.log(`${j.source.padEnd(15)} ${j.name.padEnd(40)} ${j.schedule.nextRun ?? '-'}  [${j.lastRun?.status ?? 'unknown'}]${flag}`);
+      const extra = j.source === 'launchd'
+        ? `  ${j.schedule.kind} gap=${j.schedule.maxGapSeconds ?? '-'} start=${j.lastRun?.startedAt ?? '-'} end=${j.lastRun?.at ?? '-'} rc=${j.lastRun?.exitCode ?? '-'}`
+        : '';
+      console.log(`${j.source.padEnd(15)} ${j.name.padEnd(40)} ${j.schedule.nextRun ?? '-'}  [${j.lastRun?.status ?? 'unknown'}]${flag}${extra}`);
     }
     for (const [k, v] of Object.entries(snap.connectors)) if (v!.state !== 'available') console.log(`# ${k}: ${v!.state} (${(v as any).reason ?? ''})`);
     for (const n of undeterminedNotices(snap.jobs)) console.log(`# ${n}`);
