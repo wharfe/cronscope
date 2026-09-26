@@ -1,4 +1,4 @@
-export type JobSource = 'crontab' | 'systemd' | 'github-actions' | 'cloudflare' | 'hermes';
+export type JobSource = 'crontab' | 'systemd' | 'github-actions' | 'cloudflare' | 'hermes' | 'launchd';
 export type RunStatus = 'success' | 'failure' | 'unknown' | 'never';
 
 export type Availability =
@@ -9,6 +9,9 @@ export type Availability =
 
 export interface LastRun {
   status: RunStatus; at?: string; exitCode?: number; fetchedAt: string; observableSince?: string;
+  // When the last run started (launchd only). Anchors the stale window, since a
+  // long run has a start but no finish yet.
+  startedAt?: string;
   // Why the status could not be determined. Its presence -- not `status ===
   // 'unknown'` -- is what marks a job as undetermined: crontab and cloudflare
   // are unknown by construction and must never be reported as a reading failure.
@@ -21,10 +24,13 @@ export interface Job {
   name: string;
   schedule: {
     raw: string;
-    kind: 'cron' | 'systemd-oncalendar' | 'interval';
+    kind: 'cron' | 'systemd-oncalendar' | 'interval' | 'launchd-calendar';
     timezone?: string;
     nextRun?: string;
     nextRunSource: 'source-authoritative' | 'computed' | 'unknown';
+    // launchd only: the longest gap between two scheduled fires. Present only when
+    // a stale check is meaningful (see docs/specs/2026-09-26-launchd-connector.md).
+    maxGapSeconds?: number;
   };
   target: string;
   location: string;

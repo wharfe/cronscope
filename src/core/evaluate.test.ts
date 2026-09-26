@@ -183,3 +183,45 @@ describe('evaluate: github-actions', () => {
     expect(r.failures).toEqual([]);
   });
 });
+
+describe('evaluate: launchd stale window (last start + max gap + 24h)', () => {
+  const NOW = new Date('2026-09-26T06:00:00Z');
+  const ld = (p: Partial<Job>): Job => job({
+    id: 'launchd|x', source: 'launchd',
+    schedule: { raw: '{"Hour":9,"Minute":10}', kind: 'launchd-calendar', nextRunSource: 'unknown', maxGapSeconds: 86400 },
+    ...p,
+  });
+  const run = (startedAt?: string, at?: string) => ({ status: 'success' as const, startedAt, at, fetchedAt: 't' });
+
+  it('is not overdue within max gap + 24h of the last start (sleep, long runs)', () => {
+    const r = evaluate([ld({ lastRun: run('2026-09-24T07:00:00Z') })], { now: NOW, graceMinutes: 60 });
+    expect(r.overdues).toEqual([]);
+  });
+  it('is overdue once max gap + 24h has passed since the last start', () => {
+    const r = evaluate([ld({ lastRun: run('2026-09-24T05:59:00Z') })], { now: NOW, graceMinutes: 60 });
+    expect(r.overdues.map(j => j.id)).toEqual(['launchd|x']);
+  });
+  it('falls back to the last finish when no start line survived the tail', () => {
+    const r = evaluate([ld({ lastRun: run(undefined, '2026-09-24T05:59:00Z') })], { now: NOW, graceMinutes: 60 });
+    expect(r.overdues).toHaveLength(1);
+  });
+  it('I1: a launchd failure reaches failures (launchd is alarmable)', () => {
+    const r = evaluate([ld({ lastRun: { status: 'failure', exitCode: 1, fetchedAt: 't' } })], { now: NOW, graceMinutes: 60 });
+    expect(r.failures.map(j => j.id)).toEqual(['launchd|x']);
+  });
+  it('a bootout launchd job is neither failure nor overdue', () => {
+    const r = evaluate([ld({ state: 'disabled_manually', lastRun: { status: 'failure', startedAt: '2026-01-01T00:00:00Z', fetchedAt: 't' } })], { now: NOW, graceMinutes: 60 });
+    expect(r.failures).toEqual([]);
+    expect(r.overdues).toEqual([]);
+  });
+  it('never flags a job that has never run, or one without a stale window', () => {
+    const never = ld({ lastRun: { status: 'never', fetchedAt: 't' } });
+    const noWindow = ld({ schedule: { raw: 'every 300s', kind: 'interval', nextRunSource: 'unknown' }, lastRun: run('2026-01-01T00:00:00Z') });
+    const r = evaluate([never, noWindow], { now: NOW, graceMinutes: 60 });
+    expect(r.overdues).toEqual([]);
+  });
+  it('ignores bootAt: a start before boot is still judged by the window', () => {
+    const r = evaluate([ld({ lastRun: run('2026-09-20T00:00:00Z') })], { now: NOW, bootAt: '2026-09-26T05:00:00Z', graceMinutes: 60 });
+    expect(r.overdues).toHaveLength(1);
+  });
+});

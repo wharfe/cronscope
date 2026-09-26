@@ -2,7 +2,7 @@ import type { Job, JobSource } from '../types.js';
 
 // Sources whose jobs can raise a failure / overdue alarm.
 export const ALARMABLE: ReadonlySet<JobSource> =
-  new Set(['systemd', 'cloudflare', 'hermes', 'crontab', 'github-actions']);
+  new Set(['systemd', 'cloudflare', 'hermes', 'crontab', 'github-actions', 'launchd']);
 
 // Sources where an `unknown` status means "we failed to read it", not "this
 // source cannot report status". crontab (crontab.ts:43-44) and cloudflare
@@ -11,10 +11,11 @@ export const ALARMABLE: ReadonlySet<JobSource> =
 // notify-state entries and made a recovered-then-failed job silent forever.
 //
 // Membership is necessary but not sufficient: a job counts as undetermined
-// only when it also carries lastRun.undeterminedReason. Today only the
-// github-actions connector sets that; systemd and hermes are listed because
+// only when it also carries lastRun.undeterminedReason. Today github-actions
+// and launchd (unparsable plist) set that; systemd and hermes are listed because
 // they could, not because they do.
-export const STATUS_KNOWABLE: ReadonlySet<JobSource> = new Set(['systemd', 'hermes', 'github-actions']);
+// launchd sets it only when a plist cannot be parsed; a missing log is `never`.
+export const STATUS_KNOWABLE: ReadonlySet<JobSource> = new Set(['systemd', 'hermes', 'github-actions', 'launchd']);
 
 // The single test for "we failed to read this", used by both the notify state
 // and the Slack output. Keeping it in one place is the point: two copies is how

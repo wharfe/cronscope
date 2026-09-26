@@ -20,11 +20,12 @@ export interface NotifyState {
 const RESEND_AFTER_MS = 24 * 60 * 60 * 1000;
 
 // Job ids are `<prefix>|<...>`; these are every prefix the connectors emit
-// (crontab.ts:10, systemd.ts, github-actions.ts, hermes.ts, cloudflare.ts:39).
+// (crontab.ts:10, systemd.ts, github-actions.ts, hermes.ts, cloudflare.ts:39, launchd.ts).
 // Nothing here needs guessing, and a wrong label would send carry-over to the
 // wrong connector's availability and drop the entry -- a spurious re-notify.
 const ID_PREFIX: Record<string, JobSource> = {
   crontab: 'crontab', systemd: 'systemd', gha: 'github-actions', hermes: 'hermes', cf: 'cloudflare',
+  launchd: 'launchd',
 };
 
 // Reasons are free-form and shift with the weather (HTTP 502 one hour, "fetch

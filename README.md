@@ -1,12 +1,12 @@
 # cronscope
 
 > **cronscope** discovers and monitors your scheduled jobs across surfaces —
-> local **crontab** & **systemd** timers, **GitHub Actions**, **Cloudflare**
+> local **crontab**, **systemd** timers & **launchd** agents, **GitHub Actions**, **Cloudflare**
 > Workers cron, and **Hermes Agent** cron — from a single CLI. Zero-config for
 > local; opt-in token for Cloudflare. `npx cronscope` and see everything that's
 > scheduled, what's overdue, and what failed. Get Slack alerts when a job breaks.
 
-ローカル(crontab / systemd)と各種サービス(GitHub Actions, Cloudflare, Hermes Agent)の
+ローカル(crontab / systemd / launchd)と各種サービス(GitHub Actions, Cloudflare, Hermes Agent)の
 定時実行を**横断的に発見・可視化**し、fail / overdue を Slack 通知する CLI。
 AI 開発時代に「自分の環境で何が定時実行されていて、何が落ちているか」を
 把握しきれなくなる問題を、pull 型の状態取得で解く。AI エージェント（Hermes Agent）の
@@ -28,6 +28,7 @@ npx cronscope check         # fail/overdue を Slack 通知（systemd timer で�
 |---|---|---|---|
 | 0 | crontab | `crontab -l` をパース。cron ログ(journalctl/syslog)から last-fired を best-effort 取得し overdue 検知 | 不要 |
 | 0 | systemd | user timer/service を `systemctl --user show` | 不要 |
+| 0 | launchd | macOS の `~/Library/LaunchAgents/com.wharfe.*.plist`（`CRONSCOPE_LAUNCHAGENTS_DIR` で差し替え可）。成否は `launchd-run.sh` のログ行、無ければ `launchctl print` | 不要 |
 | 0 | github-actions | `~/dev` 配下の `.github/workflows/*.yml` を走査。token があれば API で `event=schedule` の直近 run 成否と workflow の有効/無効を取得 | 任意（あれば fail 検知） |
 | 0 | hermes | [Hermes Agent](https://github.com/NousResearch/hermes-agent) の `~/.hermes/cron/jobs.json` を読み、last-run 成否・次回実行を取得 | 不要 |
 | 1 | cloudflare | API で Workers cron triggers を列挙（BYOK） | API token |
@@ -39,6 +40,8 @@ github-actions は token があれば fail 検知の対象になる。判定は 
 token が無い場合は discovery だけ動き、status は `unknown` のまま `check` が「判定不能」として毎回 1 行報告する（`disabled_*` も判別できないので `nextRun` は計算した値が出る）。
 
 hermes / systemd は last-run 成否が取れるため fail / overdue アラートの対象になる（hermes は権威 `next_run_at` を使い、スケジューラ停止で発火が止まると overdue として検知する）。
+
+launchd は rc≠0 を fail として通知する（75 のロック競合と 129/130/143 の中断は除く）。スリープする Mac では発火枠ちょうどの遅延判定が誤検知だらけになるため、overdue は粗く「最後の start から、予定の最大間隔 + 24 時間たっても次が始まらない」ときだけ（`launchd-run.sh` を通る時刻指定ジョブのみ。一度も走っていないジョブは対象外）。詳細と既知の限界は [docs/specs/2026-09-26-launchd-connector.md](docs/specs/2026-09-26-launchd-connector.md)。
 
 crontab は exit code を残さないため status は `unknown`（成否は取れない）。ただし cron ログが読めれば last-fired と「鳴っていない（overdue）」を best-effort 検知する。誤検知を避けるため overdue は「観測窓内で実際に発火を観測したジョブが、その後の発火を落とした」場合に限定する（追加直後で未発火のジョブは対象外）。ログが読めない環境では last-run なしに degrade する。
 
