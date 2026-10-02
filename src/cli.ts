@@ -17,6 +17,7 @@ import { loadNotifyState, saveNotifyState, noticeKeys, noticesToSend, nextNotice
 import { saveSnapshot } from './store/snapshot.js';
 import { evaluate } from './core/evaluate.js';
 import { formatDigest, sendSlack, undeterminedNotices } from './outputs/slack.js';
+import { runIdentityLines } from './outputs/trace.js';
 import { serveSnapshot } from './outputs/web.js';
 
 const CONNECTORS = [crontabConnector, systemdConnector, githubActionsConnector, cloudflareConnector, hermesConnector, launchdConnector];
@@ -86,6 +87,9 @@ async function main() {
     }
     for (const j of failures) console.log(`FAILURE  [${j.source}] ${j.name}`);
     for (const j of overdues) console.log(`OVERDUE  [${j.source}] ${j.name}${j.state ? ` (${j.state})` : ''}`);
+    // Printed before anything that can throw (sendSlack below), so a rejected
+    // webhook never costs the record of which run this hour's verdict came from.
+    for (const line of runIdentityLines(snap.jobs)) console.log(line);
 
     const at = ctx.now().toISOString();
     const keys = noticeKeys(snap.jobs);

@@ -175,6 +175,15 @@ export const githubActionsConnector: Connector = {
                 at: new Date(h.newest.createdAt).toISOString(),
                 fetchedAt,
                 undeterminedReason: s.reason,
+                // Field by field, not `...h.judged`: the snapshot persists the
+                // whole Job, so only the allowlisted identity may ride along.
+                ...(h.judged ? { run: {
+                  id: h.judged.runId,
+                  judgedAttempt: h.judged.judgedAttempt,
+                  latestAttempt: h.judged.latestAttempt,
+                  conclusion: h.judged.conclusion,
+                  latestConclusion: h.judged.latestConclusion,
+                } } : {}),
               };
             }
           }

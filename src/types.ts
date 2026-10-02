@@ -16,6 +16,17 @@ export interface LastRun {
   // 'unknown'` -- is what marks a job as undetermined: crontab and cloudflare
   // are unknown by construction and must never be reported as a reading failure.
   undeterminedReason?: string;
+  // github-actions only: which run and attempt `status` was derived from. The
+  // snapshot is overwritten every check, so `check` also prints this as one
+  // `# gha` line per job, which the launchd log keeps (wharfe/cronscope#4).
+  // Absent when no run history was obtained (never ran, no token, API failure).
+  run?: {
+    id: number;
+    judgedAttempt: number;            // attempt the verdict came from (1 under the current rule)
+    latestAttempt: number;            // attempt count the listing showed; > 1 = a re-run exists
+    conclusion: string | null;        // GitHub conclusion of the judged attempt (charset-guarded)
+    latestConclusion: string | null;  // same for the latest attempt
+  };
 }
 
 export interface Job {

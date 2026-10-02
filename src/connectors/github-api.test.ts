@@ -323,3 +323,116 @@ describe('fields we actually rely on are validated, not just typed', () => {
     expect(got.ok).toBe(false);
   });
 });
+
+import { safeConclusion } from './github-api.js';
+
+describe('run identity (wharfe/cronscope#4)', () => {
+  // GitHub sends far more per run than we look at. The identity is built by
+  // picking fields, never by copying the entry, so junk on the fixture must
+  // not reach the result.
+  const JUNK = {
+    html_url: 'https://github.com/wharfe/lex-diff/actions/runs/3',
+    head_commit: { message: 'ci: token ghp_MUSTNOTLEAK_0123456789' },
+    triggering_actor: { login: 'someone' },
+  };
+
+  it('returns exactly which run and attempt the verdict came from, and nothing else', async () => {
+    const c = ctx({ fetch: fetchStub({ '/runs': { body: { workflow_runs: [
+      { id: 3, run_attempt: 1, conclusion: 'failure', created_at: '2026-09-08T00:00:00Z', ...JUNK },
+      { id: 2, run_attempt: 1, conclusion: 'success', created_at: '2026-09-07T00:00:00Z', ...JUNK },
+    ] } } }) });
+    const got = await fetchScheduledRuns(c, REF, 42, TOKEN);
+    expect(got.ok).toBe(true);
+    if (!got.ok) return;
+    expect(got.value.judged).toStrictEqual(
+      { runId: 3, judgedAttempt: 1, latestAttempt: 1, conclusion: 'failure', latestConclusion: 'failure' });
+    expect(got.value.newest).toEqual({ conclusion: 'failure', createdAt: '2026-09-08T00:00:00Z' });
+    expect(JSON.stringify(got)).not.toContain('MUSTNOTLEAK');
+    expect(JSON.stringify(got)).not.toContain('someone');
+  });
+
+  it('tells a re-run apart: judged attempt 1, latest attempt as listed, both conclusions', async () => {
+    const c = ctx({ fetch: fetchStub({
+      '/attempts/1': { body: { conclusion: 'failure', ...JUNK } },
+      '/runs': { body: { workflow_runs: [
+        { id: 9, run_attempt: 2, conclusion: 'success', created_at: '2026-09-08T00:00:00Z', ...JUNK }] } },
+    }) });
+    const got = await fetchScheduledRuns(c, REF, 42, TOKEN);
+    expect(got.ok).toBe(true);
+    if (!got.ok) return;
+    expect(got.value.judged).toStrictEqual(
+      { runId: 9, judgedAttempt: 1, latestAttempt: 2, conclusion: 'failure', latestConclusion: 'success' });
+    expect(got.value.newest?.conclusion).toBe('failure');   // the verdict itself is unchanged
+    expect(JSON.stringify(got)).not.toContain('MUSTNOTLEAK');
+  });
+
+  it('carries no identity key at all when the workflow never ran', async () => {
+    // toEqual ignores keys whose value is undefined, so the existing never-test
+    // cannot see a stray `judged: undefined`; check key absence directly.
+    const c = ctx({ fetch: fetchStub({ '/runs': { body: { workflow_runs: [] } } }) });
+    const got = await fetchScheduledRuns(c, REF, 42, TOKEN);
+    expect(got.ok).toBe(true);
+    if (!got.ok) return;
+    expect('judged' in got.value).toBe(false);
+  });
+
+  it('stores a conclusion outside the documented charset as "unrecognized" but judges on the raw value', async () => {
+    const c = ctx({ fetch: fetchStub({ '/runs': { body: { workflow_runs: [
+      { id: 5, run_attempt: 1, conclusion: 'Weird Value! ghp_MUSTNOTLEAK_0123456789', created_at: '2026-09-08T00:00:00Z' }] } } }) });
+    const got = await fetchScheduledRuns(c, REF, 42, TOKEN);
+    expect(got.ok).toBe(true);
+    if (!got.ok) return;
+    expect(got.value.judged?.conclusion).toBe('unrecognized');
+    expect(got.value.judged?.latestConclusion).toBe('unrecognized');
+    expect(got.value.newest?.conclusion).toBe('Weird Value! ghp_MUSTNOTLEAK_0123456789');   // statusOf input is raw
+    expect(JSON.stringify(got.value.judged)).not.toContain('MUSTNOTLEAK');
+  });
+
+  it('keeps a short token-shaped conclusion out of the persisted identity', async () => {
+    // The canary is 26 characters: inside the charset cap, so only the prefix
+    // rule stands between it and state.json.
+    const c = ctx({ fetch: fetchStub({ '/runs': { body: { workflow_runs: [
+      { id: 6, run_attempt: 1, conclusion: 'ghp_MUSTNOTLEAK_0123456789', created_at: '2026-09-08T00:00:00Z' }] } } }) });
+    const got = await fetchScheduledRuns(c, REF, 42, TOKEN);
+    expect(got.ok).toBe(true);
+    if (!got.ok) return;
+    expect(JSON.stringify(got.value.judged)).not.toContain('MUSTNOTLEAK');
+    expect(got.value.judged?.conclusion).toBe('unrecognized');
+  });
+});
+
+describe('safeConclusion', () => {
+  it('passes every documented GitHub conclusion and null through untouched', () => {
+    for (const c of ['success', 'failure', 'cancelled', 'skipped', 'neutral', 'timed_out', 'action_required', 'stale', 'startup_failure']) {
+      expect(safeConclusion(c)).toBe(c);
+    }
+    expect(safeConclusion(null)).toBeNull();
+  });
+
+  it('lets a drifted-but-plain value through, so the log still says what GitHub said', () => {
+    expect(safeConclusion('Success')).toBe('Success');
+    expect(safeConclusion('timed-out2')).toBe('timed-out2');
+  });
+
+  it('replaces anything with other characters, anything token-length, and the empty string', () => {
+    expect(safeConclusion('')).toBe('unrecognized');
+    expect(safeConclusion('x'.repeat(33))).toBe('unrecognized');
+    expect(safeConclusion('a b')).toBe('unrecognized');
+    expect(safeConclusion('ghp_MUSTNOTLEAK_0123456789abcdefghijklmnop')).toBe('unrecognized');
+  });
+
+  it('rejects a token-shaped value even when it is short enough for the charset', () => {
+    // The 32-char cap alone lets a 26-char `ghp_...` through; the prefix is
+    // what has to be refused.
+    expect(safeConclusion('ghp_MUSTNOTLEAK_0123456789')).toBe('unrecognized');
+    expect(safeConclusion('github_pat_ABCDEFGHIJKLMNOP')).toBe('unrecognized');
+    expect(safeConclusion('gho_abcdefghijklmnopqrstuv')).toBe('unrecognized');
+  });
+
+  it('does not let a real value impersonate the two sentinel words', () => {
+    // `null` is rendered as the word null and the guard writes `unrecognized`;
+    // a conclusion that spells either would be unreadable in the log.
+    expect(safeConclusion('null')).toBe('unrecognized');
+    expect(safeConclusion('unrecognized')).toBe('unrecognized');
+  });
+});
