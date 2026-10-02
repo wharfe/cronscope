@@ -387,6 +387,18 @@ describe('run identity (wharfe/cronscope#4)', () => {
     expect(got.value.newest?.conclusion).toBe('Weird Value! ghp_MUSTNOTLEAK_0123456789');   // statusOf input is raw
     expect(JSON.stringify(got.value.judged)).not.toContain('MUSTNOTLEAK');
   });
+
+  it('keeps a short token-shaped conclusion out of the persisted identity', async () => {
+    // The canary is 26 characters: inside the charset cap, so only the prefix
+    // rule stands between it and state.json.
+    const c = ctx({ fetch: fetchStub({ '/runs': { body: { workflow_runs: [
+      { id: 6, run_attempt: 1, conclusion: 'ghp_MUSTNOTLEAK_0123456789', created_at: '2026-09-08T00:00:00Z' }] } } }) });
+    const got = await fetchScheduledRuns(c, REF, 42, TOKEN);
+    expect(got.ok).toBe(true);
+    if (!got.ok) return;
+    expect(JSON.stringify(got.value.judged)).not.toContain('MUSTNOTLEAK');
+    expect(got.value.judged?.conclusion).toBe('unrecognized');
+  });
 });
 
 describe('safeConclusion', () => {
@@ -407,5 +419,20 @@ describe('safeConclusion', () => {
     expect(safeConclusion('x'.repeat(33))).toBe('unrecognized');
     expect(safeConclusion('a b')).toBe('unrecognized');
     expect(safeConclusion('ghp_MUSTNOTLEAK_0123456789abcdefghijklmnop')).toBe('unrecognized');
+  });
+
+  it('rejects a token-shaped value even when it is short enough for the charset', () => {
+    // The 32-char cap alone lets a 26-char `ghp_...` through; the prefix is
+    // what has to be refused.
+    expect(safeConclusion('ghp_MUSTNOTLEAK_0123456789')).toBe('unrecognized');
+    expect(safeConclusion('github_pat_ABCDEFGHIJKLMNOP')).toBe('unrecognized');
+    expect(safeConclusion('gho_abcdefghijklmnopqrstuv')).toBe('unrecognized');
+  });
+
+  it('does not let a real value impersonate the two sentinel words', () => {
+    // `null` is rendered as the word null and the guard writes `unrecognized`;
+    // a conclusion that spells either would be unreadable in the log.
+    expect(safeConclusion('null')).toBe('unrecognized');
+    expect(safeConclusion('unrecognized')).toBe('unrecognized');
   });
 });

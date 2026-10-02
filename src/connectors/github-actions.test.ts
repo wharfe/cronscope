@@ -296,12 +296,12 @@ describe('run identity on the job (wharfe/cronscope#4)', () => {
   it('records no identity when there is no run to point at', async () => {
     const never = (await githubActionsConnector.discover(apiCtx({ [WF_PATH]: WORKFLOW }, { fetch: ghFetch(ACTIVE, []) })))[0];
     expect(never.lastRun?.status).toBe('never');
-    expect(never.lastRun?.run).toBeUndefined();
+    expect('run' in (never.lastRun ?? {})).toBe(false);
     const failed = (await githubActionsConnector.discover(apiCtx({ [WF_PATH]: WORKFLOW }, {
       fetch: (async () => ({ ok: false, status: 401, json: async () => ({}) })) as unknown as typeof fetch })))[0];
-    expect(failed.lastRun?.run).toBeUndefined();
+    expect('run' in (failed.lastRun ?? {})).toBe(false);
     const noToken = (await githubActionsConnector.discover(ctx({ [WF_PATH]: WORKFLOW })))[0];
-    expect(noToken.lastRun?.run).toBeUndefined();
+    expect('run' in (noToken.lastRun ?? {})).toBe(false);
   });
 
   it('guards the persisted conclusion, not the verdict', async () => {

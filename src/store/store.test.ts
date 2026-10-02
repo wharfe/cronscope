@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { mkdtempSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { saveSnapshot, loadSnapshot } from './snapshot.js';
@@ -63,6 +62,7 @@ describe('notify-state store', () => {
   });
 });
 
+import { writeFile } from 'node:fs/promises';
 import { classifyReason, noticeKeys, noticesToSend, nextNoticeState, jobsForKeys, carryOverJobs } from './notify-state.js';
 import type { Availability, Job, JobSource } from '../types.js';
 

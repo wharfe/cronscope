@@ -78,12 +78,18 @@ export interface RunIdentity {
 // timed_out, action_required, stale, startup_failure). The charset is kept a
 // little wider than that so a drifted value (casing, a digit) still reaches the
 // log in the one case it matters -- an unexpected conclusion IS a false
-// FAILURE -- while the length cap keeps any token out (classic 40, fine-grained
-// 93 characters). statusOf() still receives the raw value; this guard sits on
-// the persistence path only.
+// FAILURE. Three things are refused before storage: anything outside the
+// charset or over 32 characters (a classic PAT is 40, a fine-grained one 93),
+// anything that starts like a GitHub token (the cap alone lets a 26-character
+// `ghp_...` through), and the two words the log already uses as sentinels.
+// statusOf() still receives the raw value; this guard sits on the persistence
+// path only.
 const CONCLUSION_RE = /^[A-Za-z0-9_-]{1,32}$/;
+const TOKEN_SHAPED_RE = /^(gh[pousr]_|github_pat_)/i;
+const SENTINELS = new Set(['null', 'unrecognized']);
 export function safeConclusion(c: string | null): string | null {
-  return c === null || CONCLUSION_RE.test(c) ? c : 'unrecognized';
+  if (c === null) return null;
+  return CONCLUSION_RE.test(c) && !TOKEN_SHAPED_RE.test(c) && !SENTINELS.has(c) ? c : 'unrecognized';
 }
 
 const API = 'https://api.github.com';
@@ -213,6 +219,9 @@ export async function fetchScheduledRuns(ctx: Ctx, ref: GhRepoRef, workflowId: n
   // the one datum that tells a masked success from a run still failing.
   const latestConclusion: string | null = newest.conclusion ?? null;
   let conclusion: string | null = latestConclusion;
+  // Which attempt `conclusion` ends up describing. Assigned inside the branch
+  // that chooses it, so a change to the rule cannot leave this out of step.
+  let judgedAttempt: number = newest.run_attempt;
   // A re-run does NOT get a new run: GitHub adds an attempt to the same run and
   // the event stays `schedule`. So the listing's conclusion is the re-run's,
   // and a manual re-run that went green would hide the scheduled slot that
@@ -224,6 +233,7 @@ export async function fetchScheduledRuns(ctx: Ctx, ref: GhRepoRef, workflowId: n
     // A number or object here would be coerced into "not success" = failure.
     if (!isConclusion(first.value?.conclusion)) return { ok: false, reason: 'unexpected response shape (run attempt)' };
     conclusion = first.value.conclusion ?? null;
+    judgedAttempt = 1;
   }
   return {
     ok: true,
@@ -234,7 +244,7 @@ export async function fetchScheduledRuns(ctx: Ctx, ref: GhRepoRef, workflowId: n
       // sends -- commit messages, actor logins, URLs -- into state.json.
       judged: {
         runId: newest.id,
-        judgedAttempt: newest.run_attempt > 1 ? 1 : newest.run_attempt,
+        judgedAttempt,
         latestAttempt: newest.run_attempt,
         conclusion: safeConclusion(conclusion),
         latestConclusion: safeConclusion(latestConclusion),
