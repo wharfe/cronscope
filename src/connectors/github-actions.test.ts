@@ -252,3 +252,65 @@ it('never puts the parser diagnostic into the reason that gets persisted and pos
   expect(j.lastRun?.undeterminedReason).toBe('workflow file could not be read or parsed');
   expect(JSON.stringify(j)).not.toContain('ghp_MUSTNOTLEAK');
 });
+
+describe('run identity on the job (wharfe/cronscope#4)', () => {
+  const JUNK = { html_url: 'https://github.com/x', head_commit: { message: 'ghp_MUSTNOTLEAK_0123456789' } };
+  const RUN = { id: 1, run_attempt: 1, conclusion: 'failure', created_at: '2026-06-11T21:00:00Z', ...JUNK };
+
+  it('records which run and attempt the verdict came from, and only that', async () => {
+    const c = apiCtx({ [WF_PATH]: WORKFLOW }, { fetch: ghFetch(ACTIVE, [RUN]) });
+    const j = (await githubActionsConnector.discover(c))[0];
+    expect(j.lastRun?.status).toBe('failure');
+    expect(j.lastRun?.run).toStrictEqual(
+      { id: 1, judgedAttempt: 1, latestAttempt: 1, conclusion: 'failure', latestConclusion: 'failure' });
+    expect(JSON.stringify(j)).not.toContain('MUSTNOTLEAK');
+    // The identity must not have leaked into the gap statistics either.
+    expect(j.observed).toEqual({ samples: 1 });
+  });
+
+  it('on a re-run, judges attempt 1 and records the listing attempt and both conclusions', async () => {
+    // ghFetch answers every URL containing `/runs` with the listing, which would
+    // also swallow `/actions/runs/9/attempts/1`; route the attempt explicitly.
+    const routed = (async (url: string) => ({
+      ok: true, status: 200,
+      json: async () => String(url).includes('/attempts/1')
+        ? { conclusion: 'failure', ...JUNK }
+        : String(url).includes('/runs')
+          ? { workflow_runs: [{ id: 9, run_attempt: 2, conclusion: 'success', created_at: '2026-06-11T21:00:00Z', ...JUNK }] }
+          : { workflows: ACTIVE },
+    })) as unknown as typeof fetch;
+    const j = (await githubActionsConnector.discover(apiCtx({ [WF_PATH]: WORKFLOW }, { fetch: routed })))[0];
+    expect(j.lastRun?.status).toBe('failure');
+    expect(j.lastRun?.run).toStrictEqual(
+      { id: 9, judgedAttempt: 1, latestAttempt: 2, conclusion: 'failure', latestConclusion: 'success' });
+    expect(JSON.stringify(j)).not.toContain('MUSTNOTLEAK');
+  });
+
+  it('keeps the identity on a skipped run (status unknown, but there IS a run to trace)', async () => {
+    const c = apiCtx({ [WF_PATH]: WORKFLOW }, { fetch: ghFetch(ACTIVE, [{ ...RUN, conclusion: 'skipped' }]) });
+    const j = (await githubActionsConnector.discover(c))[0];
+    expect(j.lastRun?.status).toBe('unknown');
+    expect(j.lastRun?.run?.conclusion).toBe('skipped');
+  });
+
+  it('records no identity when there is no run to point at', async () => {
+    const never = (await githubActionsConnector.discover(apiCtx({ [WF_PATH]: WORKFLOW }, { fetch: ghFetch(ACTIVE, []) })))[0];
+    expect(never.lastRun?.status).toBe('never');
+    expect(never.lastRun?.run).toBeUndefined();
+    const failed = (await githubActionsConnector.discover(apiCtx({ [WF_PATH]: WORKFLOW }, {
+      fetch: (async () => ({ ok: false, status: 401, json: async () => ({}) })) as unknown as typeof fetch })))[0];
+    expect(failed.lastRun?.run).toBeUndefined();
+    const noToken = (await githubActionsConnector.discover(ctx({ [WF_PATH]: WORKFLOW })))[0];
+    expect(noToken.lastRun?.run).toBeUndefined();
+  });
+
+  it('guards the persisted conclusion, not the verdict', async () => {
+    // The charset guard sits on the persistence path only: an unknown
+    // conclusion is still a failure, and the raw string stays out of the Job.
+    const c = apiCtx({ [WF_PATH]: WORKFLOW }, { fetch: ghFetch(ACTIVE, [{ ...RUN, conclusion: 'Weird Value!' }]) });
+    const j = (await githubActionsConnector.discover(c))[0];
+    expect(j.lastRun?.status).toBe('failure');
+    expect(j.lastRun?.run?.conclusion).toBe('unrecognized');
+    expect(JSON.stringify(j)).not.toContain('Weird');
+  });
+});

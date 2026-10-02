@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { mkdtempSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { saveSnapshot, loadSnapshot } from './snapshot.js';
@@ -25,6 +26,31 @@ describe('snapshot store', () => {
     await saveSnapshot(join(dir, 's.json'), { ...snap, schemaVersion: 99 as any });
     expect(await loadSnapshot(join(dir, 's.json'))).toBeNull();
   });
+
+  it('round-trips the run identity on a job (wharfe/cronscope#4)', async () => {
+    const run = { id: 9, judgedAttempt: 1, latestAttempt: 2, conclusion: 'failure', latestConclusion: 'success' };
+    const withRun: Snapshot = { ...snap, jobs: [{
+      id: 'gha|1', source: 'github-actions', name: 'n', target: 't', location: 'l',
+      schedule: { raw: '0 0 * * *', kind: 'cron', nextRunSource: 'computed' },
+      lastRun: { status: 'failure', at: 'a', fetchedAt: 'f', run },
+    }] };
+    await saveSnapshot(join(dir, 'r.json'), withRun);
+    expect((await loadSnapshot(join(dir, 'r.json')))?.jobs[0].lastRun?.run).toStrictEqual(run);
+  });
+
+  it('still reads a snapshot written before the run identity existed', async () => {
+    // Same schemaVersion on purpose: the field is optional, so an older file
+    // must load as-is rather than being discarded as an unknown version.
+    const p = join(dir, 'old.json');
+    await writeFile(p, JSON.stringify({ schemaVersion: 1, generatedAt: 'g', host: {}, connectors: {}, jobs: [{
+      id: 'gha|1', source: 'github-actions', name: 'n', target: 't', location: 'l',
+      schedule: { raw: '0 0 * * *', kind: 'cron', nextRunSource: 'computed' },
+      lastRun: { status: 'failure', at: 'a', fetchedAt: 'f' },
+    }] }), 'utf8');
+    const loaded = await loadSnapshot(p);
+    expect(loaded?.jobs[0].lastRun?.status).toBe('failure');
+    expect(loaded?.jobs[0].lastRun?.run).toBeUndefined();
+  });
 });
 
 describe('notify-state store', () => {
@@ -37,7 +63,6 @@ describe('notify-state store', () => {
   });
 });
 
-import { writeFile } from 'node:fs/promises';
 import { classifyReason, noticeKeys, noticesToSend, nextNoticeState, jobsForKeys, carryOverJobs } from './notify-state.js';
 import type { Availability, Job, JobSource } from '../types.js';
 
