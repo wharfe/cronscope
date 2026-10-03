@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Job } from './types.js';
@@ -173,6 +173,7 @@ beforeEach(() => {
   expect(homedir()).toBe(h.home);
 });
 afterEach(() => {
+  rmSync(h.home, { recursive: true, force: true });
   process.argv = argv;
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
@@ -281,6 +282,15 @@ describe('cronscope check: a connector that fell over (wharfe/cronscope#5)', () 
     expectCompleted();
     expect(h.fetchCalls).toHaveLength(1);
     expect(readState().notices).toEqual({ [K('cloudflare')]: '2026-10-03T06:00:00.000Z' });
+  });
+
+  it('re-sends a key standing for more than 24h', async () => {
+    seedState({ schemaVersion: 1, jobs: {}, notices: { [K('cloudflare')]: '2026-10-01T00:00:00.000Z' } });
+    h.behave.cloudflare = throwing('discover');
+    await runCheck();
+    expectCompleted();
+    expect(h.fetchCalls).toHaveLength(1);
+    expect(readState().notices).toEqual({ [K('cloudflare')]: NOW });
   });
 
   it('drops the key on recovery and sends again at once when it falls over again', async () => {
