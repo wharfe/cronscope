@@ -48,3 +48,48 @@ describe('runScan: degraded connectors', () => {
     expect(snap.connectors['github-actions']?.state).toBe('degraded');
   });
 });
+
+describe('runScan: which unavailable came from an exception (wharfe/cronscope#5)', () => {
+  const conn = (id: any, over: Partial<Connector>): Connector => ({ ...okConn(id, []), ...over });
+
+  it('marks an availability() that threw', async () => {
+    const snap = await runScan([conn('cloudflare', { availability: async () => { throw new Error('boom'); } })], ctx, undefined);
+    expect(snap.connectors.cloudflare).toEqual({ state: 'unavailable', reason: 'boom', thrownBy: 'availability' });
+  });
+
+  it('marks a discover() that threw', async () => {
+    const snap = await runScan([conn('cloudflare', { discover: async () => { throw new Error('boom'); } })], ctx, undefined);
+    expect(snap.connectors.cloudflare).toEqual({ state: 'unavailable', reason: 'boom', thrownBy: 'discover' });
+  });
+
+  it('marks a degraded connector whose discover() threw', async () => {
+    const snap = await runScan([conn('github-actions', {
+      availability: async () => ({ state: 'degraded', reason: 'no GitHub token' }),
+      discover: async () => { throw new Error('boom'); },
+    })], ctx, undefined);
+    expect(snap.connectors['github-actions']).toEqual({ state: 'unavailable', reason: 'boom', thrownBy: 'discover' });
+  });
+
+  it('leaves a declared unavailable, skipped, degraded or available unmarked', async () => {
+    const snap = await runScan([
+      conn('crontab', { availability: async () => ({ state: 'unavailable', reason: 'no crontab' }) }),
+      conn('cloudflare', { availability: async () => ({ state: 'skipped', reason: 'no token' }) }),
+      conn('github-actions', { availability: async () => ({ state: 'degraded', reason: 'no GitHub token' }) }),
+      okConn('systemd', []),
+    ], ctx, undefined);
+    expect(snap.connectors).toEqual({
+      crontab: { state: 'unavailable', reason: 'no crontab' },
+      cloudflare: { state: 'skipped', reason: 'no token' },
+      'github-actions': { state: 'degraded', reason: 'no GitHub token' },
+      systemd: { state: 'available' },
+    });
+  });
+
+  it('drops a marker a connector set on itself', async () => {
+    // The type forbids it; this is the runtime half, for a connector that got around the type.
+    const snap = await runScan([conn('crontab', {
+      availability: async () => ({ state: 'unavailable', reason: 'no crontab', thrownBy: 'availability' }) as any,
+    })], ctx, undefined);
+    expect(snap.connectors.crontab).toEqual({ state: 'unavailable', reason: 'no crontab' });
+  });
+});

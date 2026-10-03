@@ -1,5 +1,18 @@
 import type { Job } from '../types.js';
 import { isUndetermined } from '../core/sources.js';
+import { connectorOfNoticeKey } from '../store/notify-state.js';
+
+// One fixed line per connector key being sent. It takes the keys, not the
+// connector states, so the exception text (paths, account ids, response
+// fragments) cannot reach Slack from here; `check` prints it to stdout.
+export function connectorNotices(sentKeys: string[]): string[] {
+  const lines: string[] = [];
+  for (const k of sentKeys) {
+    const id = connectorOfNoticeKey(k);
+    if (id) lines.push(`${id}: connector が例外で停止し、この回は job を確認できていない（詳細は check のログ）`);
+  }
+  return lines;
+}
 
 // One line per (source, reason) pair. A job counts only when its source is
 // meant to know its status and this run recorded why it could not be read --

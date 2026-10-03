@@ -1,4 +1,4 @@
-import type { Availability, Connector, Ctx, Job, LastRun, RunStatus } from '../types.js';
+import type { Connector, DeclaredAvailability, Ctx, Job, LastRun, RunStatus } from '../types.js';
 
 // Reads macOS launchd user agents (~/Library/LaunchAgents/com.wharfe.*.plist).
 // Design and its limits: docs/specs/2026-09-26-launchd-connector.md.
@@ -175,7 +175,7 @@ async function jobOf(ctx: Ctx, dir: string, file: string, domain: string): Promi
 export const launchdConnector: Connector = {
   id: 'launchd',
   tier: 0,
-  async availability(ctx): Promise<Availability> {
+  async availability(ctx): Promise<DeclaredAvailability> {
     const u = await uid(ctx);
     if (!u) return { state: 'unavailable', reason: 'cannot determine uid' };
     const r = await ctx.run(['launchctl', 'print', `gui/${u}`]);
