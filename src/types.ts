@@ -1,11 +1,25 @@
-export type JobSource = 'crontab' | 'systemd' | 'github-actions' | 'cloudflare' | 'hermes' | 'launchd';
+// Every connector id, as a value: the closed list a connector notice key is
+// checked against (wharfe/cronscope#5).
+export const JOB_SOURCES = ['crontab', 'systemd', 'github-actions', 'cloudflare', 'hermes', 'launchd'] as const;
+export type JobSource = typeof JOB_SOURCES[number];
 export type RunStatus = 'success' | 'failure' | 'unknown' | 'never';
+
+// Which call the pipeline caught an exception from. Present only when the
+// pipeline set it: a connector reporting itself unavailable (no crontab, no
+// systemd user manager) is usually a machine without that scheduler, not an
+// incident, and must never be notified as one.
+export type UnavailableThrownBy = 'availability' | 'discover';
 
 export type Availability =
   | { state: 'available' }
   | { state: 'degraded'; reason: string }   // discovery works, status enrichment does not
-  | { state: 'unavailable'; reason: string }
+  | { state: 'unavailable'; reason: string; thrownBy?: UnavailableThrownBy }
   | { state: 'skipped'; reason: string };
+
+// What a connector may say about itself: everything except `thrownBy`.
+export type DeclaredAvailability =
+  | Exclude<Availability, { state: 'unavailable' }>
+  | { state: 'unavailable'; reason: string; thrownBy?: never };
 
 export interface LastRun {
   status: RunStatus; at?: string; exitCode?: number; fetchedAt: string; observableSince?: string;
@@ -76,6 +90,6 @@ export interface Ctx {
 export interface Connector {
   id: JobSource;
   tier: 0 | 1;
-  availability(ctx: Ctx): Promise<Availability>;
+  availability(ctx: Ctx): Promise<DeclaredAvailability>;
   discover(ctx: Ctx): Promise<Job[]>;
 }

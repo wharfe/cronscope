@@ -304,3 +304,42 @@ describe('an undelivered alert must not swallow another job recovery', () => {
     expect(saved['gha|B']).toBeUndefined();   // stays pending, so it retries
   });
 });
+
+import { connectorNoticeKey, connectorNoticeKeys, connectorOfNoticeKey } from './notify-state.js';
+import { JOB_SOURCES } from '../types.js';
+
+describe('connectorNoticeKeys (wharfe/cronscope#5)', () => {
+  const SENTINEL = 'SENTINEL-7f3a /Users/someone/private token=abc123';
+
+  it('keys only a connector the pipeline caught an exception from', () => {
+    expect(connectorNoticeKeys({
+      systemd: { state: 'unavailable', reason: SENTINEL, thrownBy: 'discover' },
+      cloudflare: { state: 'unavailable', reason: 'x', thrownBy: 'availability' },
+      crontab: { state: 'unavailable', reason: 'no crontab' },
+      hermes: { state: 'skipped', reason: 'x' },
+      'github-actions': { state: 'degraded', reason: 'no GitHub token' },
+      launchd: { state: 'available' },
+    })).toEqual(['connector/cloudflare/unavailable', 'connector/systemd/unavailable']);
+  });
+
+  it('keeps the key fixed whatever the exception said', () => {
+    const k = (reason: string) => connectorNoticeKeys({ cloudflare: { state: 'unavailable', reason, thrownBy: 'discover' } });
+    expect(k(SENTINEL)).toEqual(['connector/cloudflare/unavailable']);
+    expect(k('HTTP 502')).toEqual(k('fetch failed'));
+  });
+
+  it('ignores a marker outside the closed set', () => {
+    expect(connectorNoticeKeys({ cloudflare: { state: 'unavailable', reason: 'x', thrownBy: 'elsewhere' as any } })).toEqual([]);
+  });
+
+  it('maps every connector key back to its connector, and nothing else', () => {
+    for (const id of JOB_SOURCES) expect(connectorOfNoticeKey(connectorNoticeKey(id))).toBe(id);
+    expect(connectorOfNoticeKey('connector/unknown/unavailable')).toBeUndefined();
+    expect(connectorOfNoticeKey('github-actions/http-4xx')).toBeUndefined();
+  });
+
+  it('does not collide with the job keys selected by jobsForKeys', () => {
+    const jobs = [undet('a', 'github-actions', 'workflow list unavailable: HTTP 401')];
+    expect(jobsForKeys(jobs, JOB_SOURCES.map(connectorNoticeKey))).toEqual([]);
+  });
+});

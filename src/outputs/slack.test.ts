@@ -88,3 +88,25 @@ describe('sendSlack delivery', () => {
     await expect(sendSlack(fetchFn, 'https://hooks.example/x', 'hi')).rejects.toThrow('410');
   });
 });
+
+import { connectorNotices } from './slack.js';
+
+describe('connectorNotices (wharfe/cronscope#5)', () => {
+  it('writes one fixed line per connector key being sent, skipping job keys', () => {
+    expect(connectorNotices(['github-actions/http-4xx', 'connector/cloudflare/unavailable', 'connector/systemd/unavailable']))
+      .toEqual([
+        'cloudflare: connector が例外で停止し、この回は job を確認できていない（詳細は check のログ）',
+        'systemd: connector が例外で停止し、この回は job を確認できていない（詳細は check のログ）',
+      ]);
+  });
+
+  it('says nothing for a key that is not being sent', () => {
+    expect(connectorNotices([])).toEqual([]);
+    expect(connectorNotices(['connector/unknown/unavailable'])).toEqual([]);
+  });
+
+  it('is not all clear when a connector line is the only thing to say', () => {
+    expect(formatDigest([], [], connectorNotices(['connector/cloudflare/unavailable'])))
+      .toBe(':grey_question: cloudflare: connector が例外で停止し、この回は job を確認できていない（詳細は check のログ）');
+  });
+});

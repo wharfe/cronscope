@@ -13,10 +13,10 @@ import { githubActionsConnector } from './connectors/github-actions.js';
 import { cloudflareConnector } from './connectors/cloudflare.js';
 import { hermesConnector } from './connectors/hermes.js';
 import { launchdConnector } from './connectors/launchd.js';
-import { loadNotifyState, saveNotifyState, noticeKeys, noticesToSend, nextNoticeState, jobsForKeys, carryOverJobs } from './store/notify-state.js';
+import { loadNotifyState, saveNotifyState, noticeKeys, connectorNoticeKeys, noticesToSend, nextNoticeState, jobsForKeys, carryOverJobs } from './store/notify-state.js';
 import { saveSnapshot } from './store/snapshot.js';
 import { evaluate } from './core/evaluate.js';
-import { formatDigest, sendSlack, undeterminedNotices } from './outputs/slack.js';
+import { connectorNotices, formatDigest, sendSlack, undeterminedNotices } from './outputs/slack.js';
 import { runIdentityLines } from './outputs/trace.js';
 import { serveSnapshot } from './outputs/web.js';
 
@@ -92,7 +92,9 @@ async function main() {
     for (const line of runIdentityLines(snap.jobs)) console.log(line);
 
     const at = ctx.now().toISOString();
-    const keys = noticeKeys(snap.jobs);
+    // One set for both kinds: nextNoticeState drops every key it is not given,
+    // so updating them separately would erase each other's send times.
+    const keys = [...noticeKeys(snap.jobs), ...connectorNoticeKeys(snap.connectors)];
     const toSend = noticesToSend(state.notices, keys, ctx.now());
 
     // Nothing to say counts as delivered; anything else has to actually reach
@@ -106,7 +108,7 @@ async function main() {
       const text = formatDigest(
         newly.filter(([, s]) => s === 'failure').map(([id]) => failures.find(j => j.id === id)!),
         newly.filter(([, s]) => s === 'overdue').map(([id]) => overdues.find(j => j.id === id)!),
-        undeterminedNotices(jobsForKeys(snap.jobs, toSend)),
+        [...undeterminedNotices(jobsForKeys(snap.jobs, toSend)), ...connectorNotices(toSend)],
       );
       if (webhook) {
         await sendSlack(ctx.fetch, webhook, text);   // throws unless Slack accepted it

@@ -1,6 +1,6 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import type { Availability, Job, JobSource } from '../types.js';
+import { JOB_SOURCES, type Availability, type Job, type JobSource } from '../types.js';
 import { isUndetermined } from '../core/sources.js';
 
 export type NoticeClass =
@@ -54,6 +54,30 @@ export function noticeKeys(jobs: Job[]): string[] {
     keys.add(`${j.source}/${classifyReason(j.lastRun!.undeterminedReason!)}`);
   }
   return [...keys].sort();
+}
+
+// A connector that fell over takes all of its jobs out of the snapshot, so the
+// job keys above cannot see it (wharfe/cronscope#5). It gets one fixed key per
+// connector: the exception text is not part of it, so a message that changes
+// every hour does not re-send hourly, and nothing raw reaches the key.
+// Only a pipeline-caught exception counts; see Availability's `thrownBy`.
+export function connectorNoticeKey(id: JobSource): string {
+  return `connector/${id}/unavailable`;
+}
+
+export function connectorOfNoticeKey(key: string): JobSource | undefined {
+  return JOB_SOURCES.find((id) => connectorNoticeKey(id) === key);
+}
+
+export function connectorNoticeKeys(connectors: Partial<Record<JobSource, Availability>>): string[] {
+  const keys: string[] = [];
+  for (const id of JOB_SOURCES) {
+    const a = connectors[id];
+    if (a?.state === 'unavailable' && (a.thrownBy === 'availability' || a.thrownBy === 'discover')) {
+      keys.push(connectorNoticeKey(id));
+    }
+  }
+  return keys.sort();
 }
 
 // The keys worth sending right now: ones never sent, plus ones standing long
