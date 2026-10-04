@@ -324,6 +324,30 @@ describe('run freshness: fairness of the re-fetch order (bundle 3)', () => {
   });
 });
 
+describe('run freshness: a job deferred half-way does not keep the front (bundle 3)', () => {
+  it('spent budget -> touched -> behind the untouched job next time', async () => {
+    const { applyProposals } = await import('../store/gha-freshness.js');
+    const names = ['a', 'b'];
+    const ids = await Promise.all(names.map((n) => jobIdOf(n)));
+    let state = { schemaVersion: 1 as const, entries: Object.fromEntries(ids.map((id, i) => [id, entryFor(i, {}, names[i])])) };
+    const lists = Object.fromEntries(names.map((n) => [n, [page(OLD)]]));
+    // 14s per call: a gets wait 1 -> R1 -> wait 3 -> R2, then no room for the GET.
+    const w1 = world({ wf: names, lists, probes: { 100: [probe()] }, entries: state.entries, latencyMs: 14_000 });
+    const j1 = await discover(w1);
+    const first = ids[0] < ids[1] ? ids[0] : ids[1];
+    const second = first === ids[0] ? ids[1] : ids[0];
+    expect(j1.find((j) => j.id === first)?.lastRun?.freshness).toMatchObject({ state: 'deferred', retries: 2 });
+    expect(w1.proposals.get(first)).toMatchObject({ outcome: 'deferred', touched: true });
+    expect(w1.proposals.get(second)).toMatchObject({ outcome: 'deferred', touched: false });
+    state = applyProposals(state, w1.proposals, new Set(ids), '2026-10-03T08:17:05.000Z');
+    // Next check: the untouched job goes first.
+    const w2 = world({ wf: names, lists, probes: { 100: [probe()] }, entries: state.entries, latencyMs: 14_000 });
+    await discover(w2);
+    expect(w2.proposals.get(second)).toMatchObject({ touched: true });
+    expect(w2.proposals.get(first)).toMatchObject({ touched: false });
+  });
+});
+
 describe('run freshness: a reader (scan / serve)', () => {
   it('#40 compares only: unknown with the reader reason, no re-fetch, no attempt lookup', async () => {
     const id = await jobIdOf();
