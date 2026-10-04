@@ -16,7 +16,7 @@ export interface FreshState {
 export type FreshLoad =
   | { kind: 'ok'; state: FreshState; dropped: number }     // dropped > 0: some entries were malformed
   | { kind: 'missing'; state: FreshState }
-  | { kind: 'corrupt'; state: FreshState; movedAside: boolean }
+  | { kind: 'corrupt'; state: FreshState }
   | { kind: 'unsupported' };     // another schemaVersion, or unreadable: never overwrite it
 
 const empty = (): FreshState => ({ schemaVersion: 1, entries: {} });
@@ -46,9 +46,12 @@ function validEntry(e: any): e is FreshEntry {
   return true;
 }
 
-// `writer` moves a corrupt file aside (one copy, `<path>.corrupt`) so the
-// evidence survives the rebuild; a reader never writes.
+// Reading only, for writers and readers alike. Moving a corrupt file aside is
+// a write, so it is a separate step (moveCorruptAside) that the check takes
+// only after confirming it was not aborted -- a load must never write.
+// `mode` is kept for the call sites' readability; it changes nothing here.
 export async function loadFreshState(path: string, mode: 'writer' | 'reader'): Promise<FreshLoad> {
+  void mode;
   let text: string;
   try { text = await readFile(path, 'utf8'); }
   catch (e: any) {
@@ -56,14 +59,15 @@ export async function loadFreshState(path: string, mode: 'writer' | 'reader'): P
     // Exists but cannot be read (permissions, a directory): not ours to replace.
     return { kind: 'unsupported' };
   }
+  const corrupt: FreshLoad = { kind: 'corrupt', state: empty() };
   let data: any;
-  try { data = JSON.parse(text); } catch { return corrupt(path, mode); }
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return corrupt(path, mode);
+  try { data = JSON.parse(text); } catch { return corrupt; }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return corrupt;
   if (data.schemaVersion !== 1) {
-    return typeof data.schemaVersion === 'number' ? { kind: 'unsupported' } : corrupt(path, mode);
+    return typeof data.schemaVersion === 'number' ? { kind: 'unsupported' } : corrupt;
   }
   if (!data.entries || typeof data.entries !== 'object' || Array.isArray(data.entries)
-      || (data.lastCheckAt !== undefined && !isIso(data.lastCheckAt))) return corrupt(path, mode);
+      || (data.lastCheckAt !== undefined && !isIso(data.lastCheckAt))) return corrupt;
   const entries: Record<string, FreshEntry> = {};
   let dropped = 0;
   for (const [id, e] of Object.entries<any>(data.entries)) {
@@ -72,12 +76,10 @@ export async function loadFreshState(path: string, mode: 'writer' | 'reader'): P
   return { kind: 'ok', state: { schemaVersion: 1, lastCheckAt: data.lastCheckAt, entries }, dropped };
 }
 
-async function corrupt(path: string, mode: 'writer' | 'reader'): Promise<FreshLoad> {
-  let movedAside = false;
-  if (mode === 'writer') {
-    try { await rename(path, `${path}.corrupt`); movedAside = true; } catch { /* reported by the caller */ }
-  }
-  return { kind: 'corrupt', state: empty(), movedAside };
+// One copy of the evidence, `<path>.corrupt` (a previous copy is replaced).
+// Writer only, under the check lock, never after an abort.
+export async function moveCorruptAside(path: string): Promise<boolean> {
+  try { await rename(path, `${path}.corrupt`); return true; } catch { return false; }
 }
 
 // Same directory, then rename: a reader sees the old file or the new one,

@@ -298,6 +298,23 @@ describe('run freshness in the connector: re-fetching an older listing (writer)'
   });
 });
 
+describe('run freshness: no free text from a re-fetch reaches the reason', () => {
+  it('an attempt-1 failure after a recovery carries a fixed reason, not the exception text', async () => {
+    const id = await jobIdOf();
+    const rerun = run(101, '2026-10-03T08:06:11Z', 'success', { run_attempt: 2 });
+    const w = world({ lists: { daily: [page(OLD), page(rerun)] }, entries: { [id]: entryFor(0) } });
+    const base = w.ctx.fetch;
+    w.ctx.fetch = (async (u: string, i: any) => {
+      if (String(u).includes('/attempts/1')) throw new Error('SECRET-FRAGMENT /Users/x/private body={"token":"abc"}');
+      return (base as any)(u, i);
+    }) as any;
+    const [j] = await discover(w);
+    expect(j.lastRun?.undeterminedReason).toBe('run freshness: listing is fresh again; first attempt not fetched in this check');
+    expect(JSON.stringify(j)).not.toContain('SECRET-FRAGMENT');
+    expect(w.proposals.get(id)).toMatchObject({ op: 'reset', outcome: 'recovered' });
+  });
+});
+
 describe('run freshness: fairness of the re-fetch order (bundle 3)', () => {
   it('a job that spent budget moves behind the untouched ones; nobody waits forever', async () => {
     const names = ['a', 'b', 'c', 'd', 'e'];

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync, statSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { applyProposals, loadFreshState, saveFreshState, type FreshState } from './gha-freshness.js';
+import { applyProposals, loadFreshState, moveCorruptAside, saveFreshState, type FreshState } from './gha-freshness.js';
 import type { FreshEntry, FreshProposal } from '../core/freshness.js';
 
 const ID = { repo: 'wharfe/proj', workflowId: 7, path: '.github/workflows/daily.yml', query: 'q1:event=schedule,status=completed' };
@@ -27,14 +27,16 @@ describe('freshness state file', () => {
     expect(await loadFreshState(path, 'writer')).toEqual({ kind: 'missing', state: { schemaVersion: 1, entries: {} } });
   });
 
-  it('writer moves a corrupt file aside (one copy) and starts empty', async () => {
+  it('loading never writes; moving a corrupt file aside is a separate step (one copy kept)', async () => {
     writeFileSync(path, '{ not json');
     const got = await loadFreshState(path, 'writer');
-    expect(got).toEqual({ kind: 'corrupt', state: { schemaVersion: 1, entries: {} }, movedAside: true });
+    expect(got).toEqual({ kind: 'corrupt', state: { schemaVersion: 1, entries: {} } });
+    expect(readFileSync(path, 'utf8')).toBe('{ not json');       // untouched by the load
+    expect(await moveCorruptAside(path)).toBe(true);
     expect(readFileSync(`${path}.corrupt`, 'utf8')).toBe('{ not json');
     expect(existsSync(path)).toBe(false);
     writeFileSync(path, '[]');
-    await loadFreshState(path, 'writer');
+    expect(await moveCorruptAside(path)).toBe(true);
     expect(readFileSync(`${path}.corrupt`, 'utf8')).toBe('[]');
   });
 

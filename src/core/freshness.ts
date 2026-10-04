@@ -69,8 +69,9 @@ export const FRESHNESS_REASONS: Record<Unresolved | 'reader', string> = {
   reader: 'run freshness: listing is older than the last check record (not rechecked here)',
 };
 
-// A re-fetch that found the listing fresh again but had no budget left for
-// the attempt-1 lookup its verdict needs. Classified as run-freshness so the
+// A re-fetch that found the listing fresh again but could not get the
+// attempt-1 lookup its verdict needs (no budget left, or the lookup failed --
+// the failure text is deliberately not carried). Classified as run-freshness so the
 // shared undetermined key does not fire on a budget this check cut itself;
 // the streak is reset (freshness WAS confirmed), so no freshness key either.
 export const FIRST_ATTEMPT_DEFERRED = 'run freshness: listing is fresh again; first attempt not fetched in this check';

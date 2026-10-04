@@ -78,7 +78,9 @@ export async function recheckCandidates(
         } else {
           const j = await judgeListing(ctx, c.ref, got.value, token, budget.callTimeout(d.callTimeoutMs));
           if (!j.ok && stopsRechecks(j.status)) stopped = j.status as 401 | 403 | 429;
-          judged = j.ok ? j : { ok: false, reason: j.reason };
+          // Fixed wording: no exception text from a re-fetch reaches the
+          // snapshot or Slack. The next check judges it the ordinary way.
+          judged = j.ok ? j : { ok: false, reason: FIRST_ATTEMPT_DEFERRED };
         }
         result = { outcome: 'recovered', touched: true, retries, pages, listing: got.value, judged };
         break;

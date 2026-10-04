@@ -47,7 +47,8 @@ Status: 実装契約（2026-10-04）。設計の経緯は handoff `2026-10-03-cr
 - identity は repo（owner/repo）・workflow id・workflow path・query 版（`q1:event=schedule,status=completed`）。job id はキー。どれか違えば別の対象（作り直し）。
 - 基準に採用するのは、一覧の newest の `workflow_id` が identity と一致し `event === 'schedule'` のときだけ。
 - 読込: 無い（ENOENT）→ 空（初回）。それ以外の理由で読めない（EACCES・EISDIR など）→ 未知の版と同じ扱い（上書きしない）。JSON 不正・形が不正 → check は `.corrupt` に退避（1 つだけ）して空から、固定キー `store/gha-freshness/corrupt`。
-  退避できなければ、そのファイルは上書きせず、その回は鮮度判定なし（同じキー）。release コマンドは、壊れた entry を 1 つでも含むファイルを変更しない（rc 1）。ファイルが無ければ rc 2。
+  読み込みは書かない。退避は読み込みとは別の段で、中断していないことを確かめた直後に行う（読み込み中に中断が来ても何も動かない）。
+  退避できなければ、そのファイルは上書きせず、その回は鮮度判定なし（同じキー。文面は「作り直した」と断言しない）。release コマンドは、壊れた entry を 1 つでも含むファイルを変更しない（rc 1）。ファイルが無ければ rc 2。
   一部の entry だけ不正 → その entry だけ捨てて同じキー。schemaVersion が 1 以外 → 鮮度判定をしない・**上書きしない**・`store/gha-freshness/unsupported`。
   読み手は退避もキーもせず、空として扱う。
 - 掃除: その check の scan に出なかった entry のうち `lastSeenAt` から 30 日を超えたものだけ。出ている job の基準は時間では消さない。
@@ -72,7 +73,7 @@ Status: 実装契約（2026-10-04）。設計の経緯は handoff `2026-10-03-cr
 - **公平性（一意の規則）**: その job の最初の待ちを始めた（＝財布を使い始めた）ら `lastRecheckAt = now`。途中で財布切れになって `deferred` でも更新する。
   1 段も始めなかった `deferred`（財布不足・停止・4 つ目以降）は更新しない。だから途中まで試した job は次の回に後ろへ回り、未着手の job が先に来る。
 
-- R で解消したが attempt 1 を財布不足で取れなかった: 固定の reason `run freshness: listing is fresh again; first attempt not fetched in this check`
+- R で解消したが attempt 1 を財布不足で取れなかった、または取得に失敗した（失敗の文面は持ち込まない）: 固定の reason `run freshness: listing is fresh again; first attempt not fetched in this check`
   （`run-freshness` に分類され共有キーに乗らない。回数は 0 なので鮮度キーも立たない。次の回の 1 段目で通常どおり判定される）。
 - newest が基準より新しい（以上）が採用条件（workflow_id・event）を満たさない: 通常判定、基準は**保持**（更新しない）、回数 0。
   鮮度の守りは古い基準のまま続く（新しいほうへは追随しない）。

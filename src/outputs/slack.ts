@@ -38,7 +38,7 @@ export function freshnessNotices(
 
 const STORE_TEXT: Record<string, string> = {
   unsaved: '鮮度の状態ファイルを保存できなかった。この回の連続回数と基準は残らず、次の回は前に保存した基準で比べる（詳細は check のログ）',
-  corrupt: '鮮度の状態ファイルが壊れていたので退避して作り直した。全 job が初回扱いになり、この回は古い一覧を見抜けない（詳細は check のログ）',
+  corrupt: '鮮度の状態ファイルに壊れた部分があった。壊れた部分の基準は失われ、その job は初回扱いになる（ファイルを退避して作り直したか、退避できずに鮮度の判定を止めているかは check のログ）',
   unsupported: '鮮度の状態ファイルを読めない、または知らない版なので触らず、鮮度の判定を止めている（詳細は check のログ）',
 };
 export function freshStoreNotices(sentKeys: string[]): string[] {

@@ -25,6 +25,7 @@ const h = vi.hoisted(() => ({
   failFreshSave: false,
   failSlack: false,
   onFetch: null as null | ((url: string) => void),
+  onFreshLoad: null as null | (() => void),
   events: [] as string[],
   globThrows: false,
   done: null as null | (() => void),
@@ -122,6 +123,11 @@ vi.mock('./store/gha-freshness.js', async (orig) => {
   const actual = await orig<typeof import('./store/gha-freshness.js')>();
   return {
     ...actual,
+    loadFreshState: async (p: string, mode: any) => {
+      const got = await actual.loadFreshState(p, mode);
+      h.onFreshLoad?.();
+      return got;
+    },
     saveFreshState: async (p: string, s: any) => {
       await guard(p);
       if (h.failFreshSave) throw new Error('ENOSPC: no space left on device');
@@ -182,7 +188,7 @@ const argv = process.argv;
 beforeEach(() => {
   h.home = mkdtempSync(join(tmpdir(), 'cronscope-fresh-cli-'));
   h.wf = ['a']; h.lists = {}; h.probes = {}; h.mono = 0;
-  h.failFreshSave = false; h.failSlack = false; h.onFetch = null; h.guardViolations = []; h.events = []; h.globThrows = false;
+  h.failFreshSave = false; h.failSlack = false; h.onFetch = null; h.guardViolations = []; h.events = []; h.globThrows = false; h.onFreshLoad = null;
   vi.stubEnv('CRONSCOPE_SLACK_WEBHOOK_URL', WEBHOOK);
   vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => { logs.push(a.join(' ')); });
   vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => { errors.push(a[0]); });
@@ -381,7 +387,7 @@ describe('check: a corrupt or foreign state file', () => {
     await check(T(1));
     expect(readFileSync(`${FRESH()}.corrupt`, 'utf8')).toBe('{ broken');
     expect(readJson(FRESH()).entries[await jobId('a')].baseline.runId).toBe(100);
-    expect(h.slack[0]).toContain('鮮度の状態ファイルが壊れていたので退避して作り直した');
+    expect(h.slack[0]).toContain('鮮度の状態ファイルに壊れた部分があった');
     await check(T(2));
     expect(h.slack).toEqual([]);
   });
@@ -415,6 +421,20 @@ describe('check: forgetting unseen entries', () => {
   });
 });
 
+describe('check: a corrupt file and an abort', () => {
+  it('a signal that lands while the state file is being read: nothing is moved aside or written', async () => {
+    mkdirSync(CFG(), { recursive: true });
+    writeFileSync(FRESH(), '{ broken');
+    h.onFreshLoad = () => process.emit('SIGTERM', 'SIGTERM');
+    h.lists = { a: [page(NEW_OK)] };
+    await check(T(1));
+    expect(h.exitCodes).toEqual([143]);
+    expect(readFileSync(FRESH(), 'utf8')).toBe('{ broken');
+    expect(existsSync(`${FRESH()}.corrupt`)).toBe(false);
+    expect(h.slack).toEqual([]);
+  });
+});
+
 describe('check: a corrupt file that cannot be moved aside', () => {
   it('is never overwritten (the evidence stays) and freshness is off for that check', async () => {
     mkdirSync(join(`${FRESH()}.corrupt`, 'x'), { recursive: true });   // rename onto a non-empty dir fails
@@ -425,7 +445,9 @@ describe('check: a corrupt file that cannot be moved aside', () => {
     expect(readFileSync(FRESH(), 'utf8')).toBe('{ broken');
     expect(h.freshSaves).toBe(0);
     expect(logs).toContain('FAILURE  [github-actions] proj/.github/workflows/a.yml');   // as before freshness existed
-    expect(h.slack[0]).toContain('鮮度の状態ファイルが壊れていた');
+    expect(h.slack[0]).toContain('鮮度の状態ファイルに壊れた部分があった');
+    expect(h.slack[0]).not.toMatch(/作り直した。|作り直した（/);   // does not claim a rebuild happened
+    expect(logs).toContain('# run freshness: state file is corrupt and could not be moved aside; left untouched, freshness off');
   });
 });
 

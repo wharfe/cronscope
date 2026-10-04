@@ -19,7 +19,7 @@ import {
   freshnessNoticeKeys, freshStoreKey, type FreshStoreProblem,
 } from './store/notify-state.js';
 import { saveSnapshot } from './store/snapshot.js';
-import { loadFreshState, saveFreshState, applyProposals, type FreshState } from './store/gha-freshness.js';
+import { loadFreshState, moveCorruptAside, saveFreshState, applyProposals, type FreshState } from './store/gha-freshness.js';
 import { acquireCheckLock, lockHeldLine } from './store/check-lock.js';
 import { FRESHNESS_DEFAULTS } from './core/freshness.js';
 import type { Ctx } from './types.js';
@@ -170,25 +170,31 @@ async function runCheck(abort: AbortSignal): Promise<boolean> {
   const halt = () => { if (abort.aborted) throw new CheckAborted('check aborted'); };
   const state = await loadNotifyState(NOTIFY_PATH);
   const problems = new Set<FreshStoreProblem>();
-  halt();   // the writer load may move a corrupt file aside: not after an abort
+  halt();
   const loaded = await loadFreshState(FRESH_PATH, 'writer');
   let prevFresh: FreshState | undefined;
   if (loaded.kind === 'unsupported') {
     problems.add('unsupported');
     console.log('# run freshness: state file unreadable or of an unknown version; left untouched, freshness off');
   } else {
+    let usable = true;
     if (loaded.kind === 'corrupt') {
+      // The move aside is a write: only now, right after an abort check, and
+      // never inside the load (an abort can land while the file is read).
+      halt();
       problems.add('corrupt');
-      console.log(loaded.movedAside
+      const moved = await moveCorruptAside(FRESH_PATH);
+      console.log(moved
         ? '# run freshness: state file was corrupt, moved to gha-freshness.json.corrupt; starting empty'
         : '# run freshness: state file is corrupt and could not be moved aside; left untouched, freshness off');
+      // Overwriting a corrupt file that is still in place would destroy the
+      // only evidence of what went wrong.
+      usable = moved;
     } else if (loaded.kind === 'ok' && loaded.dropped) {
       problems.add('corrupt');
       console.log(`# run freshness: dropped ${loaded.dropped} malformed entries`);
     }
-    // Overwriting a corrupt file that is still in place would destroy the
-    // only evidence of what went wrong.
-    if (loaded.kind !== 'corrupt' || loaded.movedAside) prevFresh = loaded.state;
+    if (usable) prevFresh = loaded.state;
   }
   const freshCtx: Ctx['freshness'] = prevFresh ? { mode: 'writer', entries: prevFresh.entries, proposals: new Map() } : undefined;
 
