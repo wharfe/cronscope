@@ -16,7 +16,7 @@ import { hermesConnector } from './connectors/hermes.js';
 import { launchdConnector } from './connectors/launchd.js';
 import {
   loadNotifyState, saveNotifyState, noticeKeys, connectorNoticeKeys, noticesToSend, nextNoticeState, jobsForKeys, carryOverJobs,
-  freshnessNoticeKeys, freshStoreKey, type FreshStoreProblem,
+  freshnessNoticeKeys, freshStoreKey, jobOfFreshnessKey, type FreshStoreProblem,
 } from './store/notify-state.js';
 import { saveSnapshot } from './store/snapshot.js';
 import { loadFreshState, moveCorruptAside, saveFreshState, applyProposals, type FreshState } from './store/gha-freshness.js';
@@ -231,12 +231,20 @@ async function runCheck(abort: AbortSignal): Promise<boolean> {
   // An unsaved check judges keys on saved data only: its own "resolved" is as
   // lost as its own count, so it does not drop a standing key either.
   const resetThisCheck = (id: string) => saved && freshCtx?.proposals.get(id)?.op === 'reset';
+  // The wording follows the same rule as the count: an unsaved check speaks
+  // from the saved entry only.
   const freshInfo = (id: string) => {
-    const p = freshCtx?.proposals.get(id);
+    const p = saved ? freshCtx?.proposals.get(id) : undefined;
     const e = (saved ? nextFresh : prevFresh)?.entries[id];
     const outcome = p?.outcome ?? e?.lastOutcome;
     return { streak: streakFor(id), outcome, notFound: p?.outcome ? !!p.notFound : !!e?.notFound };
   };
+  // An unsaved check is skipped, so it must not drop a freshness key that is
+  // standing on saved data just because its own scan lost the job.
+  const standingFreshKeys = !prevFresh || saved ? [] : Object.keys(state.notices).filter((k) => {
+    const id = jobOfFreshnessKey(k);
+    return !!id && streakFor(id) >= FRESHNESS_DEFAULTS.threshold;
+  });
 
   const { failures, overdues } = evaluate(snap.jobs, { now: ctx.now(), bootAt: snap.host.bootAt, graceMinutes: cfg.graceMinutes });
   const current = new Map<string, 'failure' | 'overdue'>();
@@ -262,13 +270,17 @@ async function runCheck(abort: AbortSignal): Promise<boolean> {
 
   // One set for every kind: nextNoticeState drops every key it is not given,
   // so updating them separately would erase each other's send times.
+  const freshKeys = prevFresh ? freshnessNoticeKeys(snap.jobs, streakFor, resetThisCheck, FRESHNESS_DEFAULTS.threshold) : [];
+  // Kept only so their clock survives; never sent from here (no job to describe).
+  const keepOnly = new Set(standingFreshKeys.filter((k) => !freshKeys.includes(k)));
   const keys = [
     ...noticeKeys(snap.jobs),
-    ...(prevFresh ? freshnessNoticeKeys(snap.jobs, streakFor, resetThisCheck, FRESHNESS_DEFAULTS.threshold) : []),
+    ...freshKeys,
+    ...keepOnly,
     ...connectorNoticeKeys(snap.connectors),
     ...[...problems].map(freshStoreKey),
   ];
-  const toSend = noticesToSend(state.notices, keys, ctx.now());
+  const toSend = noticesToSend(state.notices, keys, ctx.now()).filter((k) => !keepOnly.has(k));
 
   // Nothing to say counts as delivered; anything else has to actually reach
   // Slack before the state advances. Recording an undelivered alert as sent

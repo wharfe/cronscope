@@ -361,6 +361,43 @@ describe('check: the state file failing to save (bundle 2)', () => {
     expect(h.slack.join('\n')).not.toContain('run 鮮度');
   });
 
+  it('an unsaved check whose scan lost the job keeps the standing key and its clock', async () => {
+    const A = await jobId('a');
+    h.lists = { a: [page(NEW_OK)] };
+    await check(T(1));
+    h.lists = { a: [page(OLD_FAIL)] }; h.probes = { 100: { status: 404 } };
+    await check(T(2));
+    await check(T(3));                                        // key sent at T(3), notFound
+    const key = `github-actions/run-freshness/${A}`;
+    h.globThrows = true; h.failFreshSave = true;              // connector falls over AND the save fails
+    await check(T(4));
+    expect(readJson(NOTIFY()).notices[key]).toBe(T(3));
+    h.globThrows = false; h.failFreshSave = false;
+    await check(T(5));                                        // back, still stale: no immediate re-send
+    expect(h.slack.join('\n')).not.toContain('run 鮮度');
+    // 24h after T(3), the same double failure again: the due key is kept but
+    // nothing body-less (an "all clear") is sent for a job that is not there.
+    h.globThrows = true; h.failFreshSave = true;
+    await check('2026-10-04T04:17:05.000Z');
+    expect(h.slack.join('\n')).not.toContain('all clear');
+    expect(readJson(NOTIFY()).notices[key]).toBe(T(3));
+  });
+
+  it('an unsaved check words a re-send from saved data only', async () => {
+    const A = await jobId('a');
+    h.lists = { a: [page(NEW_OK)] };
+    await check(T(1));
+    h.lists = { a: [page(OLD_FAIL)] }; h.probes = { 100: { status: 404 } };
+    await check(T(2));
+    await check(T(3));                                        // sent: unverified + notFound
+    // 24h later, the check sees a recovery but cannot save it: the re-send must
+    // still describe the saved state.
+    h.lists = { a: [page(NEWER_OK)] }; h.failFreshSave = true;
+    await check('2026-10-04T03:17:05.000Z');
+    const line = h.slack.join('\n');
+    expect(line).toContain('run 鮮度を 2 回続けて確認できていない（unverified。基準 run が API で見つからない');
+  });
+
   it('#35 Slack failing does not cost the saved streak', async () => {
     const A = await jobId('a');
     h.lists = { a: [page(NEW_OK)] };
