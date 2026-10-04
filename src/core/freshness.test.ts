@@ -69,6 +69,18 @@ describe('Budget', () => {
   });
 });
 
+describe('Budget on a real (fractional) clock', () => {
+  it('hands AbortSignal.timeout an integer it accepts', () => {
+    let t = 0.25;
+    const b = new Budget(() => t, 30_000);
+    t += 22_000.58;
+    const ms = b.callTimeout(10_000);
+    expect(Number.isInteger(ms)).toBe(true);
+    expect(ms).toBeLessThanOrEqual(b.remaining());
+    expect(() => AbortSignal.timeout(ms)).not.toThrow();
+  });
+});
+
 describe('nextStreak', () => {
   it('resets, increments or keeps', () => {
     expect([nextStreak(3, 'reset'), nextStreak(3, 'inc'), nextStreak(3, 'keep')]).toEqual([0, 4, 3]);

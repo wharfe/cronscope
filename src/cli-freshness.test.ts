@@ -26,6 +26,7 @@ const h = vi.hoisted(() => ({
   failSlack: false,
   onFetch: null as null | ((url: string) => void),
   events: [] as string[],
+  globThrows: false,
   done: null as null | (() => void),
 }));
 
@@ -49,7 +50,7 @@ vi.mock('./runtime.js', () => ({
         ? { stdout: `${ROOT}/proj\n`, stderr: '', code: 0 }
         : { stdout: 'https://github.com/wharfe/proj.git\n', stderr: '', code: 0 },
       readFile: async (p: string) => files[p] ?? '',
-      glob: async () => Object.keys(files),
+      glob: async () => { if (h.globThrows) throw new Error('scan root vanished'); return Object.keys(files); },
       env: { CRONSCOPE_GH_TOKEN: 'ghp_dummy_token_0123456789' }, homeDir: h.home, scanRoots: [ROOT],
       monoMs: () => h.mono,
       sleep: async (ms: number) => { h.mono += ms; },
@@ -181,7 +182,7 @@ const argv = process.argv;
 beforeEach(() => {
   h.home = mkdtempSync(join(tmpdir(), 'cronscope-fresh-cli-'));
   h.wf = ['a']; h.lists = {}; h.probes = {}; h.mono = 0;
-  h.failFreshSave = false; h.failSlack = false; h.onFetch = null; h.guardViolations = []; h.events = [];
+  h.failFreshSave = false; h.failSlack = false; h.onFetch = null; h.guardViolations = []; h.events = []; h.globThrows = false;
   vi.stubEnv('CRONSCOPE_SLACK_WEBHOOK_URL', WEBHOOK);
   vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => { logs.push(a.join(' ')); });
   vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => { errors.push(a[0]); });
@@ -397,6 +398,37 @@ describe('check: a corrupt or foreign state file', () => {
   });
 });
 
+describe('check: forgetting unseen entries', () => {
+  it('#45 #49 forgets an entry unseen for 30 days only when the connector really ran', async () => {
+    const A = await jobId('a');
+    mkdirSync(CFG(), { recursive: true });
+    const old = { identity: { repo: 'wharfe/proj', workflowId: 9, path: '.github/workflows/gone.yml', query: 'q1:event=schedule,status=completed' },
+      baseline: { runId: 1, createdAt: '2026-08-01T00:00:00.000Z', judgedStatus: 'success', conclusion: 'success', judgedAttempt: 1, latestAttempt: 1, confirmedAt: '2026-08-01T00:00:00.000Z' },
+      streak: 0, lastSeenAt: '2026-08-01T00:00:00.000Z' };
+    writeFileSync(FRESH(), JSON.stringify({ schemaVersion: 1, entries: { 'gha|gone00000000': old } }));
+    h.globThrows = true;                                       // github-actions connector falls over
+    await check(T(1));
+    expect(Object.keys(readJson(FRESH()).entries)).toEqual(['gha|gone00000000']);
+    h.globThrows = false; h.lists = { a: [page(NEW_OK)] };
+    await check(T(2));
+    expect(Object.keys(readJson(FRESH()).entries)).toEqual([A]);
+  });
+});
+
+describe('check: a corrupt file that cannot be moved aside', () => {
+  it('is never overwritten (the evidence stays) and freshness is off for that check', async () => {
+    mkdirSync(join(`${FRESH()}.corrupt`, 'x'), { recursive: true });   // rename onto a non-empty dir fails
+    writeFileSync(FRESH(), '{ broken');
+    h.lists = { a: [page(OLD_FAIL)] };
+    await check(T(1));
+    expect(errors).toEqual([]);
+    expect(readFileSync(FRESH(), 'utf8')).toBe('{ broken');
+    expect(h.freshSaves).toBe(0);
+    expect(logs).toContain('FAILURE  [github-actions] proj/.github/workflows/a.yml');   // as before freshness existed
+    expect(h.slack[0]).toContain('鮮度の状態ファイルが壊れていた');
+  });
+});
+
 describe('the check lock', () => {
   const seedLock = (acquiredAt: string, pid = process.pid) => {
     mkdirSync(CFG(), { recursive: true });
@@ -416,7 +448,7 @@ describe('the check lock', () => {
     h.lists = { a: [page(NEW_OK)] };
     await check(T(1));
     expect(h.exitCodes).toEqual([75]);
-    expect(logs[0]).toMatch(/^# check skipped: another check holds the lock \(pid=\d+, held 1m\); nothing was changed$/);
+    expect(logs[0]).toMatch(/^# check skipped: another check holds the lock \(pid=\d+, alive=yes, held 1m\); nothing was changed$/);
     nothingWritten();
   });
 
@@ -445,11 +477,15 @@ describe('the check lock', () => {
   it('SIGTERM mid-scan: stops the work, saves nothing, sends nothing, then releases and exits 143', async () => {
     h.wf = ['a', 'b'];
     h.lists = { a: [page(NEW_OK)], b: [page(NEW_OK)] };
-    h.onFetch = (u) => { if (u.includes('/runs?')) process.emit('SIGTERM', 'SIGTERM'); };
+    const tried: string[] = [];
+    h.onFetch = (u) => {
+      if (u.includes('/runs?')) tried.push(u.match(/workflows\/(\d+)\//)![1]);
+      if (u.includes('/workflows/7/runs?')) process.emit('SIGTERM', 'SIGTERM');
+    };
     await check(T(1));
     await new Promise((r) => setTimeout(r, 50));   // let any still-running fetch finish
     // The lock went only after the last fetch of this check had settled.
-    expect(h.events.filter((e) => e === 'fetch-done').length).toBeGreaterThanOrEqual(2);
+    expect(tried).toEqual(['7', '8']);   // b's listing (workflow 8) was really attempted after the signal
     expect(h.events.indexOf('release')).toBeGreaterThan(h.events.lastIndexOf('fetch-done'));
     expect(h.exitCodes).toEqual([143]);
     expect(logs).toContain('# check: received SIGTERM; stopping its work before releasing the lock');
@@ -528,6 +564,24 @@ describe('gha-freshness release (D1)', () => {
     h.lists = { a: [page(OLD_FAIL)] };
     await check(T(3));
     expect(logs).toContain('FAILURE  [github-actions] proj/.github/workflows/a.yml');
+  });
+
+  it('refuses (rc 1, nothing changed) when other entries in the file are malformed -- they would be lost', async () => {
+    const A = await setup();
+    const st = readJson(FRESH());
+    st.entries['gha|bad000000000'] = { broken: true };
+    writeFileSync(FRESH(), JSON.stringify(st));
+    const before = readFileSync(FRESH(), 'utf8');
+    await cli(args(A), T(2));
+    expect(h.exitCodes).toEqual([1]);
+    expect(readFileSync(FRESH(), 'utf8')).toBe(before);
+  });
+
+  it('a missing state file is "no such baseline" (rc 2) with or without --yes', async () => {
+    await cli(args('gha|000000000000'), T(2));
+    expect(h.exitCodes).toEqual([2]);
+    await cli(args('gha|000000000000', {}, false), T(2));
+    expect(h.exitCodes).toEqual([2]);
   });
 
   it('does nothing while a check holds the lock', async () => {

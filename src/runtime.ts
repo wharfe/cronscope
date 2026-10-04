@@ -47,12 +47,29 @@ export function makeCtx(scanRoots: string[], abort?: AbortSignal): Ctx {
   return {
     now: () => new Date(),
     async run(cmd) {
-      try {
-        const { stdout, stderr } = await pexec(cmd[0], cmd.slice(1), { maxBuffer: 10 * 1024 * 1024, ...(abort ? { signal: abort } : {}) });
-        return { stdout, stderr, code: 0 };
-      } catch (e: any) {
-        return { stdout: e.stdout ?? '', stderr: e.stderr ?? String(e), code: e.code ?? 1 };
+      if (!abort) {
+        try {
+          const { stdout, stderr } = await pexec(cmd[0], cmd.slice(1), { maxBuffer: 10 * 1024 * 1024 });
+          return { stdout, stderr, code: 0 };
+        } catch (e: any) {
+          return { stdout: e.stdout ?? '', stderr: e.stderr ?? String(e), code: e.code ?? 1 };
+        }
       }
+      // Under the check's abort signal: execFile calls back as soon as it has
+      // SENT the kill, before the child is gone. Resolve only once the child
+      // has closed, so "the check settled" really means its children stopped
+      // (a child that ignores SIGTERM keeps the lock held until the grace
+      // timer gives up on it -- cli.ts).
+      return new Promise((resolve) => {
+        const child = execFile(cmd[0], cmd.slice(1), { maxBuffer: 10 * 1024 * 1024, signal: abort }, (e: any, stdout, stderr) => {
+          const result = e
+            ? { stdout: String(stdout ?? ''), stderr: String(stderr ?? '') || String(e), code: typeof e.code === 'number' ? e.code : 1 }
+            : { stdout: String(stdout), stderr: String(stderr), code: 0 };
+          // Never started (ENOENT and the like): there is nothing to wait for.
+          if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) resolve(result);
+          else child.once('close', () => resolve(result));
+        });
+      });
     },
     readFile: (p) => readFile(p, 'utf8'),
     async glob(pattern, cwd) {

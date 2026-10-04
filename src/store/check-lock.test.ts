@@ -53,7 +53,7 @@ describe('check lock', () => {
 
   it('words the two outcomes as fixed lines that say nothing was changed', () => {
     expect(lockHeldLine({ ok: false, pid: 4, heldMs: 5 * 60_000, alive: 'yes', suspect: false }, 'check'))
-      .toBe('# check skipped: another check holds the lock (pid=4, held 5m); nothing was changed');
+      .toBe('# check skipped: another check holds the lock (pid=4, alive=yes, held 5m); nothing was changed');
     expect(lockHeldLine({ ok: false, pid: 4, heldMs: 3 * 3600_000, alive: 'no', suspect: true }, 'check'))
       .toContain('lock held for more than 2h (pid=4, alive=no, held 180m); nothing was changed');
   });

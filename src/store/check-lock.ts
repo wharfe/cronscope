@@ -77,5 +77,5 @@ export function lockHeldLine(a: Extract<Acquired, { ok: false }>, what: string):
   const held = a.heldMs === undefined ? '?' : `${Math.floor(a.heldMs / 60_000)}m`;
   return a.suspect
     ? `# ${what} lock held for more than 2h (pid=${a.pid ?? '?'}, alive=${a.alive}, held ${held}); nothing was changed. If that process is gone, remove ~/.config/cronscope/check.lock by hand (README)`
-    : `# ${what} skipped: another check holds the lock (pid=${a.pid ?? '?'}, held ${held}); nothing was changed`;
+    : `# ${what} skipped: another check holds the lock (pid=${a.pid ?? '?'}, alive=${a.alive}, held ${held}); nothing was changed`;
 }

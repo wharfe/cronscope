@@ -28,11 +28,11 @@ Status: 実装契約（2026-10-04）。設計の経緯は handoff `2026-10-03-cr
 - **止め方（期限 600 秒・SIGINT・SIGTERM で共通）**: 中断 → 自分の処理が settle したのを確かめる → 解放、の順。
   1. check 専用の AbortController を中断する。ctx の fetch（全 connector と Slack）と `ctx.run` の子プロセスはこの信号を受ける
      （Node 18 のため `AbortSignal.any` は使わず手で合成）。2 段目は次の段を始めない。
-  2. 中断より後には、新しい保存も送信も始めない。中断の時点で始まっていた書き込みは完了を待つ。
+  2. 中断より後には、新しい保存も送信も始めない（壊れたファイルの退避を含む）。中断の時点で始まっていた書き込みは完了を待つ。
      専用 state の保存が中断より前に終わっていれば、その回は数えられている（Slack と notify-state は次の回へ回る）。
   3. `runCheck` の promise が settle したら lock を外し、rc 1（期限）/ 130 / 143。
   4. 15 秒（暫定）以内に settle しなければ、**lock を残したまま** rc 1。以後の check は取得失敗になり、人の対処を待つ。
-  - 「settle」で保証できるのは、プロセス内の await と直接の子プロセスまで（execFile の中断は子を kill して close を待つ）。孫プロセスは残りうるが、
+  - 「settle」で保証できるのは、プロセス内の await と直接の子プロセスまで（`ctx.run` は中断で子を kill し、子の close を待ってから返す）。孫プロセスは残りうるが、
     今の子コマンド（git・gh auth token）は読み取りだけなので排他は破れない。不変条件: check の中で待たない promise を作らない。
   - signal のハンドラ（SIGINT・SIGTERM・SIGHUP）は lock を取る前に登録し、lock を外した後に外す。
   - release コマンドには止め方を入れていない。Ctrl-C などで止まると lock が残り、人の対処になる（README）。
@@ -47,6 +47,7 @@ Status: 実装契約（2026-10-04）。設計の経緯は handoff `2026-10-03-cr
 - identity は repo（owner/repo）・workflow id・workflow path・query 版（`q1:event=schedule,status=completed`）。job id はキー。どれか違えば別の対象（作り直し）。
 - 基準に採用するのは、一覧の newest の `workflow_id` が identity と一致し `event === 'schedule'` のときだけ。
 - 読込: 無い（ENOENT）→ 空（初回）。それ以外の理由で読めない（EACCES・EISDIR など）→ 未知の版と同じ扱い（上書きしない）。JSON 不正・形が不正 → check は `.corrupt` に退避（1 つだけ）して空から、固定キー `store/gha-freshness/corrupt`。
+  退避できなければ、そのファイルは上書きせず、その回は鮮度判定なし（同じキー）。release コマンドは、壊れた entry を 1 つでも含むファイルを変更しない（rc 1）。ファイルが無ければ rc 2。
   一部の entry だけ不正 → その entry だけ捨てて同じキー。schemaVersion が 1 以外 → 鮮度判定をしない・**上書きしない**・`store/gha-freshness/unsupported`。
   読み手は退避もキーもせず、空として扱う。
 - 掃除: その check の scan に出なかった entry のうち `lastSeenAt` から 30 日を超えたものだけ。出ている job の基準は時間では消さない。
@@ -152,4 +153,4 @@ D1 の注意（解放は復旧の確認ではない／次は初回扱い／古�
 
 ## ログ
 
-`# gha` 行は今のまま。後退を見つけた job だけ `# gha-freshness job=… outcome=… streak=… retries=… v=… stop=… mark_run=… mark_created=… pages=<n>/<newest>/<oldest>/<total>,… name=…`（数値・時刻・固定語だけ）。
+`# gha` 行は今のまま。後退を見つけた job だけ `# gha-freshness job=… outcome=… streak=… retries=… probe=… stop=… mark_run=… mark_created=… pages=<n>/<newest>/<oldest>/<total>,… name=…`（数値・時刻・固定語だけ）。

@@ -26,15 +26,19 @@ const OUTCOMES = new Set(['fresh', 'recovered', 'behind', 'rerunning', 'unverifi
 const isIso = (v: unknown): v is string => typeof v === 'string' && !isNaN(new Date(v).getTime());
 const isPosInt = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v > 0;
 
+const isObj = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v);
+
 function validEntry(e: any): e is FreshEntry {
-  const id = e?.identity;
-  if (!id || typeof id.repo !== 'string' || !isPosInt(id.workflowId) || typeof id.path !== 'string' || typeof id.query !== 'string') return false;
+  if (!isObj(e)) return false;
+  const id = e.identity;
+  if (!isObj(id) || typeof id.repo !== 'string' || !isPosInt(id.workflowId) || typeof id.path !== 'string' || typeof id.query !== 'string') return false;
   if (!(typeof e.streak === 'number' && Number.isInteger(e.streak) && e.streak >= 0) || !isIso(e.lastSeenAt)) return false;
   if (e.lastOutcome !== undefined && !OUTCOMES.has(e.lastOutcome)) return false;
   if (e.lastRecheckAt !== undefined && !isIso(e.lastRecheckAt)) return false;
   if (e.notFound !== undefined && typeof e.notFound !== 'boolean') return false;
   const b = e.baseline;
   if (b !== undefined) {
+    if (!isObj(b)) return false;
     if (!isPosInt(b.runId) || !isIso(b.createdAt) || !STATUSES.has(b.judgedStatus) || !isIso(b.confirmedAt)) return false;
     if (!(b.conclusion === null || typeof b.conclusion === 'string')) return false;
     if (!isPosInt(b.judgedAttempt) || !isPosInt(b.latestAttempt)) return false;

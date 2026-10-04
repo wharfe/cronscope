@@ -146,7 +146,8 @@ export class Budget {
   // Room for a wait of `waitMs` followed by a call of at least minSliceMs.
   canWaitThenCall(waitMs: number, minSliceMs: number): boolean { return this.remaining() - waitMs >= minSliceMs; }
   canCall(minSliceMs: number): boolean { return this.remaining() >= minSliceMs; }
-  callTimeout(capMs: number): number { return Math.min(capMs, this.remaining()); }
+  // An integer: AbortSignal.timeout throws on a fraction, and performance.now() is fractional.
+  callTimeout(capMs: number): number { return Math.floor(Math.min(capMs, this.remaining())); }
 }
 
 export function nextStreak(prev: number, op: StreakOp): number {

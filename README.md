@@ -71,7 +71,7 @@ job id・run id は check のログの `# gha-freshness` 行（`job=` と `mark_
 - 取れなかった: `# check skipped: another check holds the lock (…); nothing was changed`、rc 75。
 - 持ち主が 2 時間（暫定）を超えて残っている: `# check lock held for more than 2h (pid=…, alive=…); nothing was changed …`、rc 1。
 - **lock は自動では回収しない**（時間でも pid でも奪わない）。check の途中でプロセスが殺された（kill -9、launchd の SIGKILL、電源断）・期限で止まり切らなかった場合は lock が残り、以後の check は止まる。直し方: 上の行の `pid=` のプロセスが本当にいないこと（`ps -p <pid>`。`alive=no` は手がかりで、判定ではない）と、ほかに check が走っていないことを確かめてから、`~/.config/cronscope/check.lock` を手で消す。
-- SIGINT / SIGTERM / SIGHUP と期限（600 秒、暫定）では、まず実行中の取得と子プロセスを中断し、止まったのを確かめてから lock を外す（rc 130 / 143 / 129 / 1）。中断した check は何も保存せず、何も送らない。15 秒で止まらなければ lock を残したまま終わる（上の手順で人が直す）。解放コマンドを Ctrl-C で止めたときも lock が残りうる。Mac が sleep するとこの期限は壁時計では延び、時計が戻ると 2 時間の判定も遅れる。
+- SIGINT / SIGTERM / SIGHUP と期限（600 秒、暫定）では、まず実行中の取得と子プロセスを中断し、止まったのを確かめてから lock を外す（rc 130 / 143 / 129 / 1）。中断した後は新しい保存も送信も始めない（すでに始まっていた書き込みは終わるのを待つので、状態ファイルの保存が中断より前に済んでいれば、その回は数えられている。送信中だった Slack は届いている場合がある）。15 秒で止まらなければ lock を残したまま終わる（上の手順で人が直す）。解放コマンドを Ctrl-C で止めたときも lock が残りうる。Mac が sleep するとこの期限は壁時計では延び、時計が戻ると 2 時間の判定も遅れる。
 
 **監視自身の盲点**: lock が詰まっていることは、ログ（launchd 経由なら `cronscope-check.log`）にしか出ない。rc 75 は launchd connector でも failure とみなさず、cronscope-check 自身も failure として通知されない。2 時間を超えても rc 1 と固定のログだけで、Slack には何も出ない（lock を持たずに Slack を送る仕組みは置いていない）。ログに残ることと通知されることは別で、詰まっている間は cronscope が何も監視していないことに、ログを見るまで気づけない。
 

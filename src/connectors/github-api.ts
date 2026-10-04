@@ -124,7 +124,7 @@ async function getJson(ctx: Ctx, url: string, token: string, timeoutMs = TIMEOUT
   try {
     // Without a deadline a stalled GitHub response hangs the hourly check until
     // the next timer fires on top of it.
-    const res: any = await ctx.fetch(url, { headers: headers(token), signal: AbortSignal.timeout(timeoutMs) } as any);
+    const res: any = await ctx.fetch(url, { headers: headers(token), signal: AbortSignal.timeout(Math.max(0, Math.floor(timeoutMs))) } as any);
     if (!res.ok) {
       return typeof res.status === 'number'
         ? { ok: false, reason: `HTTP ${res.status}`, status: res.status }

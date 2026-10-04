@@ -143,8 +143,9 @@ async function lockedCheck() {
     process.exit(lock.suspect ? 1 : 75);
     return;
   }
+  // Not unref'd either: a check stuck on a promise that holds nothing open
+  // must still reach stop() rather than drift out as a silent rc 0.
   const deadline = setTimeout(() => stop('deadline'), CHECK_DEADLINE_MS);
-  deadline.unref();
   let failed = false;
   let error: unknown;
   try {
@@ -169,6 +170,7 @@ async function runCheck(abort: AbortSignal): Promise<boolean> {
   const halt = () => { if (abort.aborted) throw new CheckAborted('check aborted'); };
   const state = await loadNotifyState(NOTIFY_PATH);
   const problems = new Set<FreshStoreProblem>();
+  halt();   // the writer load may move a corrupt file aside: not after an abort
   const loaded = await loadFreshState(FRESH_PATH, 'writer');
   let prevFresh: FreshState | undefined;
   if (loaded.kind === 'unsupported') {
@@ -177,12 +179,16 @@ async function runCheck(abort: AbortSignal): Promise<boolean> {
   } else {
     if (loaded.kind === 'corrupt') {
       problems.add('corrupt');
-      console.log(`# run freshness: state file was corrupt${loaded.movedAside ? ', moved to gha-freshness.json.corrupt' : ''}; starting empty`);
+      console.log(loaded.movedAside
+        ? '# run freshness: state file was corrupt, moved to gha-freshness.json.corrupt; starting empty'
+        : '# run freshness: state file is corrupt and could not be moved aside; left untouched, freshness off');
     } else if (loaded.kind === 'ok' && loaded.dropped) {
       problems.add('corrupt');
       console.log(`# run freshness: dropped ${loaded.dropped} malformed entries`);
     }
-    prevFresh = loaded.state;
+    // Overwriting a corrupt file that is still in place would destroy the
+    // only evidence of what went wrong.
+    if (loaded.kind !== 'corrupt' || loaded.movedAside) prevFresh = loaded.state;
   }
   const freshCtx: Ctx['freshness'] = prevFresh ? { mode: 'writer', entries: prevFresh.entries, proposals: new Map() } : undefined;
 
@@ -345,8 +351,12 @@ async function releaseCommand(args: string[]) {
   try {
     // Read as a reader: a corrupt file is refused here, not moved aside.
     const got = await loadFreshState(FRESH_PATH, 'reader');
-    if (got.kind !== 'ok') {
-      console.log('# release: the freshness state file is missing, corrupt or of an unknown version; nothing was changed');
+    if (got.kind === 'missing') {
+      console.log('# release: no saved baseline matches that job id, repo, workflow id and run; nothing was changed');
+      code = 2;
+    } else if (got.kind !== 'ok' || got.dropped > 0) {
+      // Saving would silently drop every malformed entry along with this one.
+      console.log('# release: the freshness state file is corrupt or of an unknown version; nothing was changed');
       code = 1;
     } else if (!matches(got.state)) {
       console.log('# release: no saved baseline matches that job id, repo, workflow id and run; nothing was changed');

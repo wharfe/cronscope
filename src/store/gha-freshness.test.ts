@@ -57,6 +57,15 @@ describe('freshness state file', () => {
     expect(statSync(path).isDirectory()).toBe(true);
   });
 
+  it('a null baseline / identity / entry is a malformed entry, not a crash', async () => {
+    writeFileSync(path, JSON.stringify({ schemaVersion: 1, entries: {
+      'gha|good': entry(), 'gha|n1': { ...entry(), baseline: null }, 'gha|n2': { ...entry(), identity: null }, 'gha|n3': null,
+    } }));
+    const got = await loadFreshState(path, 'writer');
+    expect(got.kind === 'ok' && Object.keys(got.state.entries)).toEqual(['gha|good']);
+    expect(got.kind === 'ok' && got.dropped).toBe(3);
+  });
+
   it('drops only the malformed entries and reports how many', async () => {
     writeFileSync(path, JSON.stringify({ schemaVersion: 1, entries: {
       'gha|good': entry(), 'gha|bad': { ...entry(), streak: -1 }, 'gha|bad2': { ...entry(), baseline: { ...BASE, runId: 'x' } },

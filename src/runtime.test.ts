@@ -41,3 +41,22 @@ describe('anySignal (Node 18 has no AbortSignal.any)', () => {
     } finally { (globalThis as any).fetch = real; }
   });
 });
+
+describe('ctx.run under the check abort signal', () => {
+  it('resolves only after the child has closed, even when it ignores SIGTERM', async () => {
+    const c = new AbortController();
+    const ctx = makeCtx([], c.signal);
+    const t0 = Date.now();
+    const pending = ctx.run([process.execPath, '-e', 'process.on("SIGTERM",()=>{}); setTimeout(()=>{}, 800)']);
+    setTimeout(() => c.abort(), 100);
+    const r = await pending;
+    expect(r.code).not.toBe(0);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(700);
+  }, 10_000);
+
+  it('still resolves at once for a command that never started', async () => {
+    const ctx = makeCtx([], new AbortController().signal);
+    const r = await ctx.run(['/nonexistent/cronscope-test-binary']);
+    expect(r.code).not.toBe(0);
+  });
+});
