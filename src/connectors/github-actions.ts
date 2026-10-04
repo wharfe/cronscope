@@ -3,9 +3,14 @@ import { parse } from 'yaml';            // YAML 1.2: `on` stays a string key, n
 import { cronNext } from '../core/schedule.js';
 import { createHash } from 'node:crypto';
 import {
-  resolveToken, resolveRepoRef, fetchWorkflows, fetchScheduledRuns,
-  type GhRepoRef, type WorkflowInfo,
+  resolveToken, resolveRepoRef, fetchWorkflows, listScheduledRuns, judgeListing,
+  type GhRepoRef, type WorkflowInfo, type RunHistory, type RunListing, type Fetched,
 } from './github-api.js';
+import {
+  FRESHNESS_QUERY, FRESHNESS_REASONS, FIRST_ATTEMPT_DEFERRED, isBehind, sameIdentity,
+  type Baseline, type FreshIdentity, type Unresolved,
+} from '../core/freshness.js';
+import { recheckCandidates, type RecheckCandidate } from './gha-recheck.js';
 
 function relPath(ctx: Ctx, file: string): string {
   for (const root of ctx.scanRoots) if (file.startsWith(root)) return file.slice(root.length).replace(/^\//, '');
@@ -92,6 +97,10 @@ export const githubActionsConnector: Connector = {
     const jobs: Job[] = [];
     const now = ctx.now();
     const fetchedAt = now.toISOString();
+    const fresh = ctx.freshness;
+    // Jobs whose listing came back older than their baseline; settled after
+    // every job's first listing is in, so one budget covers all re-fetches.
+    const behind: { index: number; cand: RecheckCandidate }[] = [];
 
     for (const root of ctx.scanRoots) {
       for (const file of await ctx.glob('**/.github/workflows/*.{yml,yaml}', root)) {
@@ -160,32 +169,27 @@ export const githubActionsConnector: Connector = {
 
         let lastRun: LastRun = { status: 'unknown', fetchedAt, undeterminedReason: undetermined };
         let observed: Job['observed'];
+        let pending: RecheckCandidate | undefined;
         if (token && info && info.state !== 'other' && split) {
-          const got = await fetchScheduledRuns(ctx, refs.get(split.repoDir)!, info.id, token);
-          if (!got.ok) {
-            lastRun = { status: 'unknown', fetchedAt, undeterminedReason: `run history unavailable: ${got.reason}` };
+          const ref = refs.get(split.repoDir)!;
+          const identity: FreshIdentity = { repo: `${ref.owner}/${ref.repo}`, workflowId: info.id, path: split.wfPath, query: FRESHNESS_QUERY };
+          const prev = fresh?.entries[jobId];
+          // A baseline from another repo / workflow / path / query is not comparable.
+          const baseline = prev && sameIdentity(prev.identity, identity) ? prev.baseline : undefined;
+          const listed = await listScheduledRuns(ctx, ref, info.id, token);
+          if (!listed.ok) {
+            lastRun = { status: 'unknown', fetchedAt, undeterminedReason: `run history unavailable: ${listed.reason}` };
+            // Nothing about freshness was observed: the streak stays where it was.
+            fresh?.proposals.set(jobId, { identity, op: 'keep', touched: false });
+          } else if (fresh && baseline && isBehind(baseline, listed.value.newest?.createdAt ?? null)) {
+            pending = { jobId, ref, identity, baseline, firstPage: listed.value.page };
           } else {
-            const h = got.value;
-            observed = { samples: h.samples, medianGapHours: h.medianGapHours, maxGapHours: h.maxGapHours };
-            if (!h.newest) lastRun = { status: 'never', fetchedAt };
-            else {
-              const s = statusOf(h.newest.conclusion);
-              lastRun = {
-                status: s.status,
-                at: new Date(h.newest.createdAt).toISOString(),
-                fetchedAt,
-                undeterminedReason: s.reason,
-                // Field by field, not `...h.judged`: the snapshot persists the
-                // whole Job, so only the allowlisted identity may ride along.
-                ...(h.judged ? { run: {
-                  id: h.judged.runId,
-                  judgedAttempt: h.judged.judgedAttempt,
-                  latestAttempt: h.judged.latestAttempt,
-                  conclusion: h.judged.conclusion,
-                  latestConclusion: h.judged.latestConclusion,
-                } } : {}),
-              };
-            }
+            const judged = await judgeListing(ctx, ref, listed.value, token);
+            ({ lastRun, observed } = fromHistory(judged, listed.value, fetchedAt));
+            fresh?.proposals.set(jobId, {
+              identity, op: 'reset', outcome: 'fresh', touched: false,
+              baseline: adopt(listed.value, judged, identity, baseline, fetchedAt),
+            });
           }
         }
 
@@ -197,6 +201,7 @@ export const githubActionsConnector: Connector = {
           : crons.map((c) => cronNext(c, now, 'UTC')).filter((x): x is string => !!x).sort();
         const nextRun = nexts[0];
 
+        if (pending) behind.push({ index: jobs.length, cand: pending });
         jobs.push({
           // One job per workflow, not per cron entry: GitHub reports runs per
           // workflow, so per-entry jobs would share one lastRun and a stopped
@@ -216,9 +221,107 @@ export const githubActionsConnector: Connector = {
         });
       }
     }
+    if (fresh && behind.length) await settleBehind(ctx, token!, fresh, jobs, behind, fetchedAt);
     return jobs;
   },
 };
+
+type Judged = Fetched<RunHistory>;
+
+// The verdict for one judged listing, exactly as before freshness existed.
+function fromHistory(got: Judged, listing: RunListing, fetchedAt: string): { lastRun: LastRun; observed?: Job['observed'] } {
+  if (!got.ok) {
+    return { lastRun: { status: 'unknown', fetchedAt,
+      undeterminedReason: got.reason === FIRST_ATTEMPT_DEFERRED ? got.reason : `run history unavailable: ${got.reason}` } };
+  }
+  const h = got.value;
+  const observed = { samples: h.samples, medianGapHours: h.medianGapHours, maxGapHours: h.maxGapHours };
+  if (!h.newest || !listing.newest) return { lastRun: { status: 'never', fetchedAt }, observed };
+  const s = statusOf(h.newest.conclusion);
+  return {
+    observed,
+    lastRun: {
+      status: s.status,
+      at: new Date(h.newest.createdAt).toISOString(),
+      fetchedAt,
+      undeterminedReason: s.reason,
+      // Field by field, not `...h.judged`: the snapshot persists the
+      // whole Job, so only the allowlisted identity may ride along.
+      ...(h.judged ? { run: {
+        id: h.judged.runId,
+        judgedAttempt: h.judged.judgedAttempt,
+        latestAttempt: h.judged.latestAttempt,
+        conclusion: h.judged.conclusion,
+        latestConclusion: h.judged.latestConclusion,
+      } } : {}),
+    },
+  };
+}
+
+// The listing's newest becomes the baseline only when it is provably a
+// scheduled run of THIS workflow and not older than the current baseline.
+// Otherwise the previous baseline stands (undefined = keep).
+function adopt(listing: RunListing, judged: Judged, identity: FreshIdentity, prev: Baseline | undefined, at: string): Baseline | undefined {
+  const n = listing.newest;
+  if (!n || n.workflowId !== identity.workflowId || n.event !== 'schedule') return undefined;
+  if (prev && new Date(n.createdAt).getTime() < new Date(prev.createdAt).getTime()) return undefined;
+  const s = judged.ok && judged.value.newest ? statusOf(judged.value.newest.conclusion).status : 'unknown';
+  return {
+    runId: n.id,
+    createdAt: new Date(n.createdAt).toISOString(),
+    judgedStatus: s,
+    conclusion: judged.ok ? judged.value.judged?.conclusion ?? null : null,
+    judgedAttempt: judged.ok ? judged.value.judged?.judgedAttempt ?? n.runAttempt : n.runAttempt,
+    latestAttempt: n.runAttempt,
+    confirmedAt: at,
+  };
+}
+
+function lastObservedOf(b: Baseline): NonNullable<LastRun['lastObserved']> {
+  return { runId: b.runId, createdAt: b.createdAt, status: b.judgedStatus, confirmedAt: b.confirmedAt };
+}
+
+// Decide every behind job. A reader only reports it; a writer re-fetches
+// within the budget and proposes the next entry for the check to save.
+async function settleBehind(
+  ctx: Ctx, token: string, fresh: NonNullable<Ctx['freshness']>, jobs: Job[],
+  behind: { index: number; cand: RecheckCandidate }[], fetchedAt: string,
+): Promise<void> {
+  const unresolved = (c: RecheckCandidate, state: Unresolved | 'unrechecked', rest: Partial<NonNullable<LastRun['freshness']>> & { pages: NonNullable<LastRun['freshness']>['pages'] }): LastRun => ({
+    status: 'unknown', fetchedAt,
+    undeterminedReason: FRESHNESS_REASONS[state === 'unrechecked' ? 'reader' : state],
+    freshness: { state, retries: 0, ...rest },
+    lastObserved: lastObservedOf(c.baseline),
+  });
+
+  if (fresh.mode === 'reader') {
+    for (const { index, cand } of behind) jobs[index].lastRun = unresolved(cand, 'unrechecked', { pages: [cand.firstPage] });
+    return;
+  }
+  const results = await recheckCandidates(ctx, token, behind.map((b) => b.cand), fresh.entries);
+  for (const { index, cand } of behind) {
+    const r = results.get(cand.jobId)!;
+    if (r.outcome === 'recovered') {
+      const { lastRun, observed } = fromHistory(r.judged, r.listing, fetchedAt);
+      jobs[index].lastRun = { ...lastRun, freshness: { state: 'recovered', retries: r.retries, pages: r.pages } };
+      jobs[index].observed = observed;
+      fresh.proposals.set(cand.jobId, {
+        identity: cand.identity, op: 'reset', outcome: 'recovered', touched: true,
+        baseline: adopt(r.listing, r.judged, cand.identity, cand.baseline, fetchedAt),
+      });
+    } else {
+      jobs[index].lastRun = unresolved(cand, r.outcome, {
+        retries: r.retries, pages: r.pages,
+        ...(r.probe ? { probe: r.probe } : {}), ...(r.stop ? { stop: r.stop } : {}),
+      });
+      jobs[index].observed = undefined;
+      fresh.proposals.set(cand.jobId, {
+        identity: cand.identity, op: 'inc', outcome: r.outcome, touched: r.touched,
+        ...(r.probe === 'not-found' ? { notFound: true } : {}),
+      });
+    }
+  }
+}
 
 // Cached per checkout: `git rev-parse` is a process spawn and several workflow
 // files usually share one repo. When the root cannot be determined we keep the

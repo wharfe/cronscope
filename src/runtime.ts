@@ -26,12 +26,29 @@ async function workflowFiles(cwd: string): Promise<string[]> {
   return out.sort();
 }
 
-export function makeCtx(scanRoots: string[]): Ctx {
+// Either signal aborts the result. Hand-rolled: AbortSignal.any is Node 20.3+
+// and CI still runs Node 18.
+export function anySignal(a?: AbortSignal, b?: AbortSignal): AbortSignal | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  const c = new AbortController();
+  if (a.aborted || b.aborted) { c.abort(); return c.signal; }
+  const on = () => c.abort();
+  a.addEventListener('abort', on, { once: true });
+  b.addEventListener('abort', on, { once: true });
+  return c.signal;
+}
+
+// `abort` (check only) stops every fetch and child process this ctx started,
+// so a check at its deadline or on a signal can be shown to have stopped
+// before it releases the lock.
+export function makeCtx(scanRoots: string[], abort?: AbortSignal): Ctx {
+  const realFetch = globalThis.fetch;
   return {
     now: () => new Date(),
     async run(cmd) {
       try {
-        const { stdout, stderr } = await pexec(cmd[0], cmd.slice(1), { maxBuffer: 10 * 1024 * 1024 });
+        const { stdout, stderr } = await pexec(cmd[0], cmd.slice(1), { maxBuffer: 10 * 1024 * 1024, ...(abort ? { signal: abort } : {}) });
         return { stdout, stderr, code: 0 };
       } catch (e: any) {
         return { stdout: e.stdout ?? '', stderr: e.stderr ?? String(e), code: e.code ?? 1 };
@@ -42,10 +59,15 @@ export function makeCtx(scanRoots: string[]): Ctx {
       if (pattern === '**/.github/workflows/*.{yml,yaml}') return workflowFiles(cwd);
       return [];
     },
-    fetch: globalThis.fetch,
+    fetch: abort
+      ? ((url: any, init?: any) => realFetch(url, { ...init, signal: anySignal(init?.signal, abort) })) as typeof fetch
+      : realFetch,
+    abort,
     env: process.env,
     homeDir: homedir(),
     scanRoots,
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    monoMs: () => performance.now(),
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   };
 }

@@ -37,6 +37,44 @@ github-actions は token があれば fail 検知の対象になる。判定は 
 
 判定に使った run は snapshot（`~/.config/cronscope/state.json`）の `lastRun.run` に残す — `id`（run ID）、`judgedAttempt`（判定した attempt。いまのルールでは常に 1）、`latestAttempt`（一覧が示した attempt 数。2 以上なら re-run があった）、`conclusion`（判定した attempt の conclusion）、`latestConclusion`（最新 attempt の conclusion）。snapshot は `check` だけでなく `scan` や `serve`（画面を開いている間は 60 秒ごと）でも上書きされるので、履歴の正本は `check` が job ごとに 1 行 `# gha job=… run=… judged_attempt=… latest_attempt=… conclusion=… latest_conclusion=… state=… status=… created=… fetched=… name=…` として stdout にも出す（launchd 経由なら `cronscope-check.log` に追記で残る。`job=` は cronscope の job id、`run=` は GitHub の run ID。時刻は UTC で `fetched=` は github-actions コネクタが取得を始めた時刻、`name=` は末尾で空白を含みうる。re-run が無ければ `latestConclusion` は `conclusion` と同じ）。これは誤判定が出たとき「どの run のどの attempt を、いつ見て、何と判定したか」を遡るためのもので（[#4](https://github.com/wharfe/cronscope/issues/4)）、判定そのものは変えない。run 履歴が取れなかった job（未実行・token 無し・API 失敗・attempt 1 の取得失敗）には付かない。conclusion は英数字・`_`・`-` の 32 文字以内でなければ `unrecognized` に置き換えて保存する（判定には生の値を使う）。
 
+### run の鮮度（[#4](https://github.com/wharfe/cronscope/issues/4) の部分対応）
+
+GitHub の run 一覧 API は、同じ query でも新しい run が欠けた古いページを返すことがある（2026-09-08 と 2026-10-03 に観測。原因は GitHub 内部で未確定）。そのまま判定すると、古いページの先頭が failure なら健全な workflow が FAILURE になり、先頭が success なら本物の failure が隠れる。そこで `check` は、前に確かめた run（**基準**）を `~/.config/cronscope/gha-freshness.json` に job ごとに 1 件残し、一覧の先頭がそれより古いときは次のように扱う。
+
+- その場で一覧を最大 2 回取り直す（1 秒・3 秒待つ）。まだ古ければ基準 run を 1 回 GET して、まだあるかを確かめる。取り直しは check 全体で 30 秒・3 job まで。401 / 403 / 429 を受けたら、その check の取り直しをすべてやめる（403 を rate limit とは決めつけない。Retry-After は待たない）。
+- 直らなければ status は `unknown`。古い success を正常とも、古い failure を新しい FAILURE とも扱わない。基準は snapshot の `lastRun.lastObserved` に**過去の証拠**として出す（今の健全性の保証ではない）。以前に通知済みの failure は、unknown の間も保持される。
+- 2 回続けて確かめられなかった job は、Slack に job ごとに固定文面で 1 行出る（キーは `github-actions/run-freshness/<job id>`。24 時間ごとに再送。job ごとに時計が分かれ、ほかの job の復旧や到達には影響されない）。数えるのは**状態ファイルの保存に成功した独立した check** だけで、同じ check の中の取り直し、`scan`、`serve` は数えない。
+- 基準 run の GET が 404 でも、基準は捨てない（削除・権限の欠け・API の食い違いを見分けられないため）。基準が変わるのは、より新しい run が一覧に出たとき、監視対象（repo・workflow id・path・query の版）が変わったとき、人が解放したときだけ。30 日の掃除は **scan に出てこなくなった job の項目**だけが対象で、生きている基準を時間で捨てることはない。
+- `scan` / `serve` は状態ファイルを**読むだけ**。基準より古い一覧は unknown と表示するが、取り直しも回数の更新もしない。
+
+`# gha-freshness job=… outcome=… streak=… retries=… probe=… stop=… mark_run=… mark_created=… pages=… name=…` の行が、後退を見つけた回だけ check のログに残る（数値・時刻・固定語だけ）。取り直しの回数・待ち・財布・しきい値・期限はどれも**暫定の既定値で、実証していない**。このログで見直す。
+
+**解決しないこと（限界）**
+
+- 基準が無い回（初回、状態ファイルが壊れて作り直した回、人が解放した直後）の古い一覧は見抜けない。
+- 状態ファイルの保存に失敗した check は数えない（stdout と Slack に `鮮度の状態ファイルを保存できなかった` と出て、rc 1）。その回に見た新しい基準は失われる。次の回は前に保存した基準で比べるので、失われた基準より古い一覧の failure を FAILURE として受け入れうる。失われた「解消」をまたいで回数が続き、鮮度の知らせが早く出ることもある。保存が失敗し続けると鮮度の知らせは出ない。状態ファイル・notify-state・Slack の失敗をまたいで「ちょうど 1 回だけ送る」ことは保証しない。壊れたファイルの知らせはその回にしか立たないので、その回の Slack が失敗すると届かない（ログには残る）。
+- GitHub 内部の原因は確定していない。#4 は閉じていない。
+
+**基準を人が解放する**: 基準 run が本当に削除された（GitHub の画面の run 一覧に無く、持ち主がログインしても run の URL が 404）と確かめたときだけ使う。
+
+```
+cronscope gha-freshness release <job id> --repo <owner/repo> --workflow-id <id> --run <基準の run id>          # 説明だけ。何も変えない
+cronscope gha-freshness release <job id> --repo <owner/repo> --workflow-id <id> --run <基準の run id> --yes    # 解放する
+```
+
+job id・run id は check のログの `# gha-freshness` 行（`job=` と `mark_run=`）にある。check と同じ lock の下で、job id・repo・workflow id・基準 run id がすべて一致したときだけ、その job の基準を消す（合わなければ何も変えず rc 2。全件を解除することはない）。**解放は復旧の確認ではない**。次の check はその job を初回として扱い、そのとき一覧が返したものをそのまま新しい基準にする。古い failure ならそれが採用され、FAILURE として通知されうる。notify-state には触らない。check が自分で解放することはない。
+
+### check の排他と lock
+
+`check`（と上の解放コマンド）は `~/.config/cronscope/check.lock` で 1 本に限る。範囲は状態ファイルの読み込みから判定・通知・保存まで全部。lock を取れなかった check は**何も読まず、何も書かない**（snapshot・状態ファイル・notify-state・Slack すべてそのまま）。
+
+- 取れなかった: `# check skipped: another check holds the lock (…); nothing was changed`、rc 75。
+- 持ち主が 2 時間（暫定）を超えて残っている: `# check lock held for more than 2h (pid=…, alive=…); nothing was changed …`、rc 1。
+- **lock は自動では回収しない**（時間でも pid でも奪わない）。check の途中でプロセスが殺された（kill -9、launchd の SIGKILL、電源断）・期限で止まり切らなかった場合は lock が残り、以後の check は止まる。直し方: 上の行の `pid=` のプロセスが本当にいないこと（`ps -p <pid>`。`alive=no` は手がかりで、判定ではない）と、ほかに check が走っていないことを確かめてから、`~/.config/cronscope/check.lock` を手で消す。
+- SIGINT / SIGTERM / SIGHUP と期限（600 秒、暫定）では、まず実行中の取得と子プロセスを中断し、止まったのを確かめてから lock を外す（rc 130 / 143 / 129 / 1）。中断した check は何も保存せず、何も送らない。15 秒で止まらなければ lock を残したまま終わる（上の手順で人が直す）。解放コマンドを Ctrl-C で止めたときも lock が残りうる。Mac が sleep するとこの期限は壁時計では延び、時計が戻ると 2 時間の判定も遅れる。
+
+**監視自身の盲点**: lock が詰まっていることは、ログ（launchd 経由なら `cronscope-check.log`）にしか出ない。rc 75 は launchd connector でも failure とみなさず、cronscope-check 自身も failure として通知されない。2 時間を超えても rc 1 と固定のログだけで、Slack には何も出ない（lock を持たずに Slack を送る仕組みは置いていない）。ログに残ることと通知されることは別で、詰まっている間は cronscope が何も監視していないことに、ログを見るまで気づけない。
+
 一方、**workflow が有効なまま GitHub が静かに発火を止めた場合は検知しない**。GitHub の scheduler は宣言した cron どおりに走らず（実測 2026-09-08: `*/15` 宣言の workflow の実発火間隔は中央値 4.4 時間、宣言の 1/18）、宣言周期から沈黙の窓を作ると誤検知か永久沈黙のどちらかになる。観測した発火間隔は snapshot に記録しており、実例が出た時点で実データから窓を決める（[#3](https://github.com/wharfe/cronscope/issues/3)）。
 
 token が無い場合は discovery だけ動き、status は `unknown` のまま `check` が「判定不能」として毎回 1 行報告する（`disabled_*` も判別できないので `nextRun` は計算した値が出る）。

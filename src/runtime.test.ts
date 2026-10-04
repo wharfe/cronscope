@@ -16,3 +16,28 @@ describe('runtime glob', () => {
     ]);
   });
 });
+
+describe('anySignal (Node 18 has no AbortSignal.any)', () => {
+  it('aborts when either side aborts', async () => {
+    const { anySignal } = await import('./runtime.js');
+    const a = new AbortController(); const b = new AbortController();
+    const s = anySignal(a.signal, b.signal)!;
+    expect(s.aborted).toBe(false);
+    b.abort();
+    expect(s.aborted).toBe(true);
+    expect(anySignal(undefined, a.signal)).toBe(a.signal);
+  });
+
+  it('the check ctx passes its abort signal into every fetch', async () => {
+    const seen: (AbortSignal | undefined)[] = [];
+    const real = globalThis.fetch;
+    (globalThis as any).fetch = async (_u: string, init: any) => { seen.push(init?.signal); return { ok: true }; };
+    try {
+      const c = new AbortController();
+      const ctx = makeCtx([], c.signal);
+      await ctx.fetch('https://example.invalid', { signal: AbortSignal.timeout(10_000) } as any);
+      c.abort();
+      expect(seen[0]?.aborted).toBe(true);
+    } finally { (globalThis as any).fetch = real; }
+  });
+});

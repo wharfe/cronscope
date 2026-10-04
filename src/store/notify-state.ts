@@ -1,11 +1,12 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, mkdir, open, rename, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { JOB_SOURCES, type Availability, type Job, type JobSource } from '../types.js';
 import { isUndetermined } from '../core/sources.js';
 
 export type NoticeClass =
   | 'no-token' | 'no-remote' | 'http-4xx' | 'http-5xx' | 'network'
-  | 'skipped' | 'parse-error' | 'api-shape' | 'workflow-state' | 'run-conclusion' | 'other';
+  | 'skipped' | 'parse-error' | 'api-shape' | 'workflow-state' | 'run-conclusion' | 'run-freshness' | 'other';
 
 export interface NotifyState {
   schemaVersion: 1;
@@ -32,6 +33,9 @@ const ID_PREFIX: Record<string, JobSource> = {
 // failed" the next). Deduping Slack on the raw string would alarm hourly, so
 // fold them into a closed set first.
 export function classifyReason(reason: string): NoticeClass {
+  // First, and anchored: freshness reasons are fixed strings (core/freshness.ts)
+  // and are notified per job, never through the shared per-class key below.
+  if (/^run freshness:/.test(reason)) return 'run-freshness';
   if (/no GitHub token/i.test(reason)) return 'no-token';
   if (/origin|remote|repo root/i.test(reason)) return 'no-remote';
   if (/skipped/i.test(reason)) return 'skipped';
@@ -47,14 +51,47 @@ export function classifyReason(reason: string): NoticeClass {
   return 'other';
 }
 
+const isFreshness = (j: Job) => classifyReason(j.lastRun!.undeterminedReason!) === 'run-freshness';
+
 export function noticeKeys(jobs: Job[]): string[] {
   const keys = new Set<string>();
   for (const j of jobs) {
-    if (!isUndetermined(j)) continue;
+    if (!isUndetermined(j) || isFreshness(j)) continue;
     keys.add(`${j.source}/${classifyReason(j.lastRun!.undeterminedReason!)}`);
   }
   return [...keys].sort();
 }
+
+// Run freshness is keyed per job (wharfe/cronscope#4). A shared key would send
+// a job that has not reached the threshold along with one that has, hold back
+// a job that reaches it while another's key stands, and let one job's recovery
+// reset the re-send clock of another. The job id is a path hash, so nothing
+// readable or secret is in the key.
+const FRESHNESS_KEY_PREFIX = 'github-actions/run-freshness/';
+export function freshnessNoticeKey(jobId: string): string { return FRESHNESS_KEY_PREFIX + jobId; }
+export function jobOfFreshnessKey(key: string): string | undefined {
+  return key.startsWith(FRESHNESS_KEY_PREFIX) ? key.slice(FRESHNESS_KEY_PREFIX.length) : undefined;
+}
+
+// `streakFor` is the count the caller is allowed to use: the saved one. A job
+// is keyed when it is in this scan, not switched off on purpose, at or over
+// the threshold, and this check did not reset it.
+export function freshnessNoticeKeys(
+  jobs: Job[], streakFor: (id: string) => number, resetThisCheck: (id: string) => boolean, threshold: number,
+): string[] {
+  const keys: string[] = [];
+  for (const j of jobs) {
+    if (j.source !== 'github-actions' || j.state === 'disabled_manually') continue;
+    if (resetThisCheck(j.id) || streakFor(j.id) < threshold) continue;
+    keys.push(freshnessNoticeKey(j.id));
+  }
+  return keys.sort();
+}
+
+// Problems with the freshness state file itself; one fixed key each.
+export type FreshStoreProblem = 'unsaved' | 'corrupt' | 'unsupported';
+export const FRESH_STORE_PROBLEMS: readonly FreshStoreProblem[] = ['unsaved', 'corrupt', 'unsupported'];
+export function freshStoreKey(p: FreshStoreProblem): string { return `store/gha-freshness/${p}`; }
 
 // A connector that fell over takes all of its jobs out of the snapshot, so the
 // job keys above cannot see it (wharfe/cronscope#5). It gets one fixed key per
@@ -103,7 +140,7 @@ export function nextNoticeState(
 }
 
 export function jobsForKeys(jobs: Job[], keys: string[]): Job[] {
-  return jobs.filter((j) => isUndetermined(j)
+  return jobs.filter((j) => isUndetermined(j) && !isFreshness(j)
     && keys.includes(`${j.source}/${classifyReason(j.lastRun!.undeterminedReason!)}`));
 }
 
@@ -163,7 +200,18 @@ export async function loadNotifyState(path: string): Promise<NotifyState> {
   return { schemaVersion: 1, jobs: {}, notices: {} };
 }
 
+// Temporary file + rename, like the freshness state: a check stopped mid-write
+// leaves the previous file, not half of one (a torn file reads as empty and
+// would re-send every standing notice).
 export async function saveNotifyState(path: string, state: NotifyState): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(state, null, 2), { mode: 0o600 });
+  const tmp = `${path}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
+  try {
+    const fh = await open(tmp, 'wx', 0o600);
+    try { await fh.writeFile(JSON.stringify(state, null, 2), 'utf8'); await fh.sync(); } finally { await fh.close(); }
+    await rename(tmp, path);
+  } catch (e) {
+    await unlink(tmp).catch(() => {});
+    throw e;
+  }
 }
