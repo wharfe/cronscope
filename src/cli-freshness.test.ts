@@ -27,6 +27,9 @@ const h = vi.hoisted(() => ({
   onFetch: null as null | ((url: string) => void),
   onFreshLoad: null as null | (() => void),
   events: [] as string[],
+  // 'abortable': a listing fetch that waits until the check's abort signal
+  // fires; 'stuck': one that never settles, abort or not.
+  hang: null as null | 'abortable' | 'stuck',
   globThrows: false,
   done: null as null | (() => void),
 }));
@@ -63,8 +66,19 @@ vi.mock('./runtime.js', () => ({
     async function answer(url: string, init: any) {
         h.mono += 100;
         h.onFetch?.(url);
+        if (h.hang && String(url).includes('/runs?')) {
+          h.events.push('fetch-start');
+          if (h.hang === 'stuck') await new Promise(() => {});
+          await new Promise<void>((resolve) => {
+            if (abort?.aborted) resolve(); else abort?.addEventListener('abort', () => resolve(), { once: true });
+          });
+          h.events.push('fetch-aborted');
+          throw new Error('This operation was aborted');
+        }
         // Lets the release, if it were (wrongly) started now, run first.
-        await new Promise((r) => setTimeout(r, 5));
+        // (Skipped under the fake clock of the deadline tests, which order
+        // their observations by the hanging fetch instead.)
+        if (!h.hang) await new Promise((r) => setTimeout(r, 5));
         if (abort?.aborted) throw new Error('This operation was aborted');
         const u = String(url);
         if (u === WEBHOOK) {
@@ -188,7 +202,7 @@ const argv = process.argv;
 beforeEach(() => {
   h.home = mkdtempSync(join(tmpdir(), 'cronscope-fresh-cli-'));
   h.wf = ['a']; h.lists = {}; h.probes = {}; h.mono = 0;
-  h.failFreshSave = false; h.failSlack = false; h.onFetch = null; h.guardViolations = []; h.events = []; h.globThrows = false; h.onFreshLoad = null;
+  h.failFreshSave = false; h.failSlack = false; h.onFetch = null; h.guardViolations = []; h.events = []; h.globThrows = false; h.onFreshLoad = null; h.hang = null;
   vi.stubEnv('CRONSCOPE_SLACK_WEBHOOK_URL', WEBHOOK);
   vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => { logs.push(a.join(' ')); });
   vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => { errors.push(a[0]); });
@@ -557,6 +571,82 @@ describe('the check lock', () => {
   });
 });
 
+describe('check: the 600s deadline and the 15s stop grace, through the real lockedCheck', () => {
+  // Only setTimeout / clearTimeout are faked, so the CLI's own deadline and
+  // grace timers run on the test's clock while file I/O stays real.
+  const tick = () => new Promise<void>((r) => setImmediate(r));
+  async function until(cond: () => boolean, what: string) {
+    for (let i = 0; i < 2000 && !cond(); i++) { await tick(); await vi.advanceTimersByTimeAsync(0); }
+    if (!cond()) throw new Error(`never happened: ${what}`);
+  }
+  async function start() {
+    h.now = new Date(T(1));
+    h.used = {}; h.slack = []; h.calls = []; h.exitCodes = []; h.freshSaves = 0; h.events = [];
+    logs = []; errors = [];
+    h.done = () => {};
+    vi.resetModules();
+    process.argv = ['node', 'cli.js', 'check'];
+    await import('./cli.js');
+  }
+  let signalListeners: Record<string, Function[]>;
+  beforeEach(() => {
+    signalListeners = Object.fromEntries(['SIGINT', 'SIGTERM', 'SIGHUP'].map((s) => [s, process.listeners(s as any)]));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    // The stuck case never reaches its own process.off; leave no listener behind.
+    for (const [sig, before] of Object.entries(signalListeners)) {
+      for (const l of process.listeners(sig as any)) if (!before.includes(l)) process.off(sig as any, l as any);
+    }
+  });
+
+  it('at 600s: aborts the fetch, waits for the work to settle, THEN unlocks; rc 1; nothing saved or sent', async () => {
+    h.lists = { a: [page(NEW_OK)] };
+    h.hang = 'abortable';
+    await start();
+    await until(() => h.events.includes('fetch-start'), 'the listing fetch started');
+    await vi.advanceTimersByTimeAsync(599_999);
+    // (the first fetch-done is the workflows listing, which completes normally)
+    expect(h.events).toEqual(['fetch-done', 'fetch-start']);   // not yet: no abort, lock held
+    expect(existsSync(LOCK())).toBe(true);
+    expect(h.exitCodes).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);                      // the deadline fires here
+    await until(() => h.exitCodes.length > 0, 'the check exited');
+    expect(logs).toContain('# check exceeded 600s; stopping its work before releasing the lock');
+    expect(h.events).toEqual(['fetch-done', 'fetch-start', 'fetch-aborted', 'fetch-done', 'release']);
+    expect(h.exitCodes).toEqual([1]);
+    expect(existsSync(LOCK())).toBe(false);
+    expect(existsSync(SNAP())).toBe(false);
+    expect(existsSync(FRESH())).toBe(false);
+    expect(existsSync(NOTIFY())).toBe(false);
+    expect(h.slack).toEqual([]);
+  });
+
+  it('work that does not stop within 15s after the abort: exits rc 1 and LEAVES the lock', async () => {
+    h.lists = { a: [page(NEW_OK)] };
+    h.hang = 'stuck';
+    await start();
+    await until(() => h.events.includes('fetch-start'), 'the listing fetch started');
+    await vi.advanceTimersByTimeAsync(600_000);                // deadline -> abort; the fetch ignores it
+    expect(logs).toContain('# check exceeded 600s; stopping its work before releasing the lock');
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(h.exitCodes).toEqual([]);                           // still waiting for the work
+    expect(existsSync(LOCK())).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);                      // the grace runs out
+    await until(() => h.exitCodes.length > 0, 'the check exited');
+    expect(h.exitCodes).toEqual([1]);
+    expect(logs).toContain('# check: its work did not stop in time; exiting WITHOUT releasing the lock (README)');
+    expect(h.events).toEqual(['fetch-done', 'fetch-start']);   // never settled, never released
+    expect(existsSync(LOCK())).toBe(true);
+    expect(JSON.parse(readFileSync(LOCK(), 'utf8')).pid).toBe(process.pid);
+    expect(existsSync(SNAP())).toBe(false);
+    expect(existsSync(FRESH())).toBe(false);
+    expect(existsSync(NOTIFY())).toBe(false);
+    expect(h.slack).toEqual([]);
+  });
+});
+
 describe('scan stays a reader', () => {
   it('#38-#42: compares with the saved baseline, never writes the freshness state', async () => {
     const A = await jobId('a');
@@ -586,8 +676,13 @@ describe('gha-freshness release (D1)', () => {
     await check(T(1));
     return jobId('a');
   };
-  const args = (id: string, over: Partial<Record<'repo' | 'wf' | 'run', string>> = {}, yes = true) =>
-    ['gha-freshness', 'release', id, '--repo', over.repo ?? 'wharfe/proj', '--workflow-id', over.wf ?? '7', '--run', over.run ?? '100', ...(yes ? ['--yes'] : [])];
+  const QV = 'q1:event=schedule,status=completed';
+  const args = (id: string, over: Partial<Record<'repo' | 'wf' | 'run' | 'path' | 'query', string | null>> = {}, yes = true) => [
+    'gha-freshness', 'release', id, '--repo', over.repo ?? 'wharfe/proj', '--workflow-id', over.wf ?? '7', '--run', over.run ?? '100',
+    ...(over.path === null ? [] : ['--path', over.path ?? '.github/workflows/a.yml']),
+    ...(over.query === null ? [] : ['--query', over.query ?? QV]),
+    ...(yes ? ['--yes'] : []),
+  ];
 
   it('explains first and changes nothing without --yes', async () => {
     const A = await setup();
@@ -599,7 +694,10 @@ describe('gha-freshness release (D1)', () => {
     expect(readFileSync(FRESH(), 'utf8')).toBe(before);
   });
 
-  it.each([['repo', { repo: 'wharfe/other' }], ['workflow id', { wf: '8' }], ['run', { run: '99' }], ['job', {}]] as const)(
+  it.each([
+    ['repo', { repo: 'wharfe/other' }], ['workflow id', { wf: '8' }], ['run', { run: '99' }], ['job', {}],
+    ['path only', { path: '.github/workflows/b.yml' }], ['query version only', { query: 'q2:event=schedule,status=completed' }],
+  ] as const)(
     'refuses a mismatching %s and changes nothing (no fallback)', async (what, over) => {
       const A = await setup();
       const before = readFileSync(FRESH(), 'utf8');
@@ -609,13 +707,31 @@ describe('gha-freshness release (D1)', () => {
       expect(existsSync(LOCK())).toBe(false);
     });
 
+  it.each([['--path', { path: null }], ['--query', { query: null }]] as const)(
+    'refuses without %s (usage, rc 2) and changes nothing, with or without --yes', async (_what, over) => {
+      const A = await setup();
+      const before = readFileSync(FRESH(), 'utf8');
+      await cli(args(A, over), T(2));
+      expect(h.exitCodes).toEqual([2]);
+      expect(errors[0]).toContain('--path <workflow path> --query <query version>');
+      await cli(args(A, over, false), T(2));
+      expect(h.exitCodes).toEqual([2]);
+      expect(readFileSync(FRESH(), 'utf8')).toBe(before);
+      expect(existsSync(LOCK())).toBe(false);
+    });
+
   it('releases exactly that entry under the lock; the next check treats the job as new', async () => {
     const A = await setup();
+    // Another valid entry must survive the release untouched.
+    const st = readJson(FRESH());
+    const other = { ...st.entries[A], identity: { ...st.entries[A].identity, path: '.github/workflows/z.yml' } };
+    st.entries['gha|otherjob0000'] = other;
+    writeFileSync(FRESH(), JSON.stringify(st));
     const notifyBefore = readFileSync(NOTIFY(), 'utf8');
     const lastCheckAt = readJson(FRESH()).lastCheckAt;
     await cli(args(A), T(2));
     expect(h.exitCodes).toEqual([]);
-    expect(readJson(FRESH()).entries).toEqual({});
+    expect(readJson(FRESH()).entries).toEqual({ 'gha|otherjob0000': other });
     expect(readJson(FRESH()).lastCheckAt).toBe(lastCheckAt);
     expect(readFileSync(NOTIFY(), 'utf8')).toBe(notifyBefore);
     expect(existsSync(LOCK())).toBe(false);

@@ -323,7 +323,7 @@ async function runCheck(abort: AbortSignal): Promise<boolean> {
   return problems.has('unsaved');
 }
 
-const RELEASE_USAGE = 'usage: cronscope gha-freshness release <job id> --repo <owner/repo> --workflow-id <id> --run <run id> [--yes]';
+const RELEASE_USAGE = 'usage: cronscope gha-freshness release <job id> --repo <owner/repo> --workflow-id <id> --path <workflow path> --query <query version> --run <run id> [--yes]';
 const RELEASE_WARNING = [
   '# Releasing a run-freshness baseline is NOT a confirmation that the workflow recovered.',
   '# The next check treats this job as seen for the first time: whatever the listing returns then becomes',
@@ -340,7 +340,13 @@ async function releaseCommand(args: string[]) {
   const repo = opt('--repo');
   const wf = Number(opt('--workflow-id'));
   const run = Number(opt('--run'));
-  if (sub !== 'release' || !jobId || !repo || !Number.isInteger(wf) || wf <= 0 || !Number.isInteger(run) || run <= 0) {
+  // The whole saved identity is matched, path and query version included: the
+  // job id is a hash of the scanRoot-relative path, not the workflow path, and
+  // never stands in for it.
+  const path = opt('--path');
+  const query = opt('--query');
+  if (sub !== 'release' || !jobId || !repo || !path || !query
+      || !Number.isInteger(wf) || wf <= 0 || !Number.isInteger(run) || run <= 0) {
     console.error(RELEASE_USAGE);
     process.exit(2);
     return;
@@ -349,13 +355,14 @@ async function releaseCommand(args: string[]) {
   const yes = rest.includes('--yes');
   const matches = (st: FreshState) => {
     const e = st.entries[jobId];
-    return !!e && e.identity.repo === repo && e.identity.workflowId === wf && e.baseline?.runId === run;
+    return !!e && e.identity.repo === repo && e.identity.workflowId === wf
+      && e.identity.path === path && e.identity.query === query && e.baseline?.runId === run;
   };
   if (!yes) {
     const got = await loadFreshState(FRESH_PATH, 'reader');
     const ok = got.kind === 'ok' && matches(got.state);
     console.log(ok ? `# dry run: would release the baseline of ${jobId} (run ${run}). Add --yes to do it; nothing was changed`
-      : '# dry run: no saved baseline matches that job id, repo, workflow id and run; nothing was changed');
+      : '# dry run: no saved baseline matches that job id, repo, workflow id, path, query version and run; nothing was changed');
     process.exit(ok ? 0 : 2);
     return;
   }
@@ -370,14 +377,14 @@ async function releaseCommand(args: string[]) {
     // Read as a reader: a corrupt file is refused here, not moved aside.
     const got = await loadFreshState(FRESH_PATH, 'reader');
     if (got.kind === 'missing') {
-      console.log('# release: no saved baseline matches that job id, repo, workflow id and run; nothing was changed');
+      console.log('# release: no saved baseline matches that job id, repo, workflow id, path, query version and run; nothing was changed');
       code = 2;
     } else if (got.kind !== 'ok' || got.dropped > 0) {
       // Saving would silently drop every malformed entry along with this one.
       console.log('# release: the freshness state file is corrupt or of an unknown version; nothing was changed');
       code = 1;
     } else if (!matches(got.state)) {
-      console.log('# release: no saved baseline matches that job id, repo, workflow id and run; nothing was changed');
+      console.log('# release: no saved baseline matches that job id, repo, workflow id, path, query version and run; nothing was changed');
       code = 2;
     } else {
       const entries = { ...got.state.entries };

@@ -58,11 +58,15 @@ GitHub の run 一覧 API は、同じ query でも新しい run が欠けた古
 **基準を人が解放する**: 基準 run が本当に削除された（GitHub の画面の run 一覧に無く、持ち主がログインしても run の URL が 404）と確かめたときだけ使う。
 
 ```
-cronscope gha-freshness release <job id> --repo <owner/repo> --workflow-id <id> --run <基準の run id>          # 説明だけ。何も変えない
-cronscope gha-freshness release <job id> --repo <owner/repo> --workflow-id <id> --run <基準の run id> --yes    # 解放する
+cronscope gha-freshness release <job id> --repo <owner/repo> --workflow-id <id> --path <workflow path> --query <query 版> --run <基準の run id>          # 説明だけ。何も変えない
+cronscope gha-freshness release <job id> --repo <owner/repo> --workflow-id <id> --path <workflow path> --query <query 版> --run <基準の run id> --yes    # 解放する
+
+# 例
+cronscope gha-freshness release 'gha|4d08cff46d69' --repo wharfe/open-gikai --workflow-id 247190830 \
+  --path .github/workflows/uptime.yml --query 'q1:event=schedule,status=completed' --run 37089018801 --yes
 ```
 
-job id・run id は check のログの `# gha-freshness` 行（`job=` と `mark_run=`）にある。check と同じ lock の下で、job id・repo・workflow id・基準 run id がすべて一致したときだけ、その job の基準を消す（合わなければ何も変えず rc 2。全件を解除することはない）。**解放は復旧の確認ではない**。次の check はその job を初回として扱い、そのとき一覧が返したものをそのまま新しい基準にする。古い failure ならそれが採用され、FAILURE として通知されうる。notify-state には触らない。check が自分で解放することはない。
+job id・run id は check のログの `# gha-freshness` 行（`job=` と `mark_run=`）にある。`--path` は repo の root から見た workflow ファイルのパス（`name=` から先頭の repo のディレクトリを除いたもの、例 `.github/workflows/uptime.yml`）、`--query` は今の query 版 `q1:event=schedule,status=completed`。どれも `gha-freshness.json` のその job の `identity` に保存されている値と同じもの。check と同じ lock の下で、job id・repo・workflow id・path・query 版・基準 run id が**すべて**一致したときだけ、その job の基準を消す（1 つでも欠けていれば usage で rc 2、合わなければ何も変えず rc 2。全件を解除することはない）。**解放は復旧の確認ではない**。次の check はその job を初回として扱い、そのとき一覧が返したものをそのまま新しい基準にする。古い failure ならそれが採用され、FAILURE として通知されうる。notify-state には触らない。check が自分で解放することはない。
 
 ### check の排他と lock
 

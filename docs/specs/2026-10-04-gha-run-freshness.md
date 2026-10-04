@@ -145,9 +145,9 @@ D1 の注意（解放は復旧の確認ではない／次は初回扱い／古�
 
 ## 人の解放（D1）
 
-`cronscope gha-freshness release <job id> --repo <owner/repo> --workflow-id <id> --run <run id> [--yes]`
-- `--yes` が無ければ説明だけ出して何も変えない（一致する基準があれば rc 0、無ければ rc 2）。照合するのは job id・repo・workflow id・基準 run id
-  （path は job id の hash に含まれる。query 版は照合しない）。説明: 解放は復旧の確認ではない／次の check はその job を初回として扱う／古い failure が基準に採用され通知されうる。
+`cronscope gha-freshness release <job id> --repo <owner/repo> --workflow-id <id> --path <workflow path> --query <query version> --run <run id> [--yes]`
+- `--yes` が無ければ説明だけ出して何も変えない（一致する基準があれば rc 0、無ければ rc 2）。照合するのは job id と、保存済みの identity の
+  repo・workflow id・path・query 版のすべて、それに基準 run id（job id の hash は path の照合の代わりにしない。どれかが欠ければ usage で rc 2）。説明: 解放は復旧の確認ではない／次の check はその job を初回として扱う／古い failure が基準に採用され通知されうる。
 - `--yes`: check と同じ lock（取れなければ何もしない rc 75 / rc 1）→ state を読む（壊れている・未知の版なら変更せず rc 1）
   → entry があり identity の repo・workflow id と基準 run id がすべて一致したときだけ、その entry を消して保存 → rc 0。
   不在・不一致は変更せず rc 2。全件解除への fallback は無い。notify-state には触らない。check は自動で解放しない。
