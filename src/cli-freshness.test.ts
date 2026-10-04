@@ -25,6 +25,7 @@ const h = vi.hoisted(() => ({
   failFreshSave: false,
   failSlack: false,
   onFetch: null as null | ((url: string) => void),
+  events: [] as string[],
   done: null as null | (() => void),
 }));
 
@@ -54,8 +55,14 @@ vi.mock('./runtime.js', () => ({
       sleep: async (ms: number) => { h.mono += ms; },
       abort,
       fetch: async (url: string, init: any) => {
+        try { return await answer(url, init); } finally { h.events.push('fetch-done'); }
+      },
+    };
+    async function answer(url: string, init: any) {
         h.mono += 100;
         h.onFetch?.(url);
+        // Lets the release, if it were (wrongly) started now, run first.
+        await new Promise((r) => setTimeout(r, 5));
         if (abort?.aborted) throw new Error('This operation was aborted');
         const u = String(url);
         if (u === WEBHOOK) {
@@ -74,8 +81,7 @@ vi.mock('./runtime.js', () => ({
         } else if (pm) { h.calls.push(`probe:${pm[1]}`); r = h.probes[pm[1]] ?? { status: 500 }; }
         else { r = { status: 200, body: { total_count: workflows.length, workflows } }; }
         return { ok: r.status === 200, status: r.status, json: async () => r.body };
-      },
-    };
+    }
   },
 }));
 vi.mock('./core/host.js', () => ({ bootAt: async () => undefined }));
@@ -134,7 +140,7 @@ vi.mock('./store/check-lock.js', async (orig) => {
       if (!got.ok) return got;
       // Bound to THIS run's promise: a late callback must not end the next run.
       const done = h.done;
-      return { ...got, release: async () => { await got.release(); setTimeout(() => done?.(), 0); } };
+      return { ...got, release: async () => { h.events.push('release'); await got.release(); setTimeout(() => done?.(), 0); } };
     },
   };
 });
@@ -175,7 +181,7 @@ const argv = process.argv;
 beforeEach(() => {
   h.home = mkdtempSync(join(tmpdir(), 'cronscope-fresh-cli-'));
   h.wf = ['a']; h.lists = {}; h.probes = {}; h.mono = 0;
-  h.failFreshSave = false; h.failSlack = false; h.onFetch = null; h.guardViolations = [];
+  h.failFreshSave = false; h.failSlack = false; h.onFetch = null; h.guardViolations = []; h.events = [];
   vi.stubEnv('CRONSCOPE_SLACK_WEBHOOK_URL', WEBHOOK);
   vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => { logs.push(a.join(' ')); });
   vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => { errors.push(a[0]); });
@@ -437,9 +443,14 @@ describe('the check lock', () => {
   });
 
   it('SIGTERM mid-scan: stops the work, saves nothing, sends nothing, then releases and exits 143', async () => {
-    h.lists = { a: [page(NEW_OK)] };
+    h.wf = ['a', 'b'];
+    h.lists = { a: [page(NEW_OK)], b: [page(NEW_OK)] };
     h.onFetch = (u) => { if (u.includes('/runs?')) process.emit('SIGTERM', 'SIGTERM'); };
     await check(T(1));
+    await new Promise((r) => setTimeout(r, 50));   // let any still-running fetch finish
+    // The lock went only after the last fetch of this check had settled.
+    expect(h.events.filter((e) => e === 'fetch-done').length).toBeGreaterThanOrEqual(2);
+    expect(h.events.indexOf('release')).toBeGreaterThan(h.events.lastIndexOf('fetch-done'));
     expect(h.exitCodes).toEqual([143]);
     expect(logs).toContain('# check: received SIGTERM; stopping its work before releasing the lock');
     expect(existsSync(SNAP())).toBe(false);
