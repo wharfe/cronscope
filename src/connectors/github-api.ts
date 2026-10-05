@@ -40,7 +40,10 @@ export async function resolveRepoRef(ctx: Ctx, repoDir: string): Promise<GhRepoR
   return r.code === 0 ? parseRemoteUrl(r.stdout) : null;
 }
 
-export type Fetched<T> = { ok: true; value: T } | { ok: false; reason: string };
+// `status` is the HTTP status of a non-2xx answer, as a number, so callers can
+// tell 401 / 403 / 404 / 429 apart without parsing `reason`. Absent for
+// network errors, timeouts and malformed bodies.
+export type Fetched<T> = { ok: true; value: T } | { ok: false; reason: string; status?: number };
 // GitHub also returns `disabled_fork` and `deleted`, and may add more. Anything
 // outside the three we act on becomes `other` and is reported as undetermined
 // rather than silently treated as active -- a `disabled_fork` workflow is one
@@ -117,12 +120,16 @@ function safeReason(e: unknown, token: string): string {
   return redact(scrubbed);
 }
 
-async function getJson(ctx: Ctx, url: string, token: string): Promise<Fetched<any>> {
+async function getJson(ctx: Ctx, url: string, token: string, timeoutMs = TIMEOUT_MS): Promise<Fetched<any>> {
   try {
     // Without a deadline a stalled GitHub response hangs the hourly check until
     // the next timer fires on top of it.
-    const res: any = await ctx.fetch(url, { headers: headers(token), signal: AbortSignal.timeout(TIMEOUT_MS) } as any);
-    if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` };
+    const res: any = await ctx.fetch(url, { headers: headers(token), signal: AbortSignal.timeout(Math.max(0, Math.floor(timeoutMs))) } as any);
+    if (!res.ok) {
+      return typeof res.status === 'number'
+        ? { ok: false, reason: `HTTP ${res.status}`, status: res.status }
+        : { ok: false, reason: `HTTP ${res.status}` };
+    }
     return { ok: true, value: await res.json() };
   } catch (e) {
     return { ok: false, reason: safeReason(e, token) };
@@ -171,11 +178,29 @@ function median(xs: number[]): number {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
-export async function fetchScheduledRuns(ctx: Ctx, ref: GhRepoRef, workflowId: number, token: string): Promise<Fetched<RunHistory>> {
+// What one listing call returned, before the verdict is taken. Split from the
+// verdict so a re-fetch can compare freshness first and pay for the attempt-1
+// lookup only when it is actually going to judge (wharfe/cronscope#4).
+export interface RunListing {
+  // The newest entry by created_at, fields picked one by one (never the raw entry).
+  newest: {
+    id: number; runAttempt: number; conclusion: string | null; createdAt: string;
+    workflowId: number | null; event: string | null;
+  } | null;
+  // Numbers and times only: for the trace line, never for a verdict.
+  page: { n: number; newest?: string; oldest?: string; total?: number };
+  medianGapHours?: number;
+  maxGapHours?: number;
+  samples: number;
+}
+
+export async function listScheduledRuns(
+  ctx: Ctx, ref: GhRepoRef, workflowId: number, token: string, timeoutMs = TIMEOUT_MS,
+): Promise<Fetched<RunListing>> {
   // event=schedule is the whole point: a manual re-run that succeeded must not
   // silence a scheduled slot that failed (measured 2026-09-08 on sumorikishi).
   const url = `${API}/repos/${ref.owner}/${ref.repo}/actions/workflows/${workflowId}/runs?event=schedule&status=completed&per_page=10`;
-  const got = await getJson(ctx, url, token);
+  const got = await getJson(ctx, url, token, timeoutMs);
   if (!got.ok) return got;
   const raw = got.value?.workflow_runs;
   // Same fail-open guard as the workflow listing: a 200 whose body is not the
@@ -194,7 +219,8 @@ export async function fetchScheduledRuns(ctx: Ctx, ref: GhRepoRef, workflowId: n
     }
   }
   const runs = [...raw].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-  if (runs.length === 0) return { ok: true, value: { newest: null, samples: 0 } };
+  const total = typeof got.value.total_count === 'number' ? got.value.total_count : undefined;
+  if (runs.length === 0) return { ok: true, value: { newest: null, page: { n: 0, total }, samples: 0 } };
   const times = runs.map((r) => new Date(r.created_at).getTime());
   const gaps: number[] = [];
   for (let i = 0; i < times.length - 1; i++) gaps.push((times[i] - times[i + 1]) / 3_600_000);
@@ -214,22 +240,55 @@ export async function fetchScheduledRuns(ctx: Ctx, ref: GhRepoRef, workflowId: n
   if (!isConclusion(newest.conclusion)) {
     return { ok: false, reason: 'unexpected response shape (run entry: conclusion)' };
   }
+  return {
+    ok: true,
+    value: {
+      newest: {
+        id: newest.id, runAttempt: newest.run_attempt, conclusion: newest.conclusion ?? null,
+        createdAt: newest.created_at,
+        // Only used to decide whether this run may become the freshness
+        // baseline; a missing or odd value just means "do not adopt".
+        workflowId: isPositiveInt(newest.workflow_id) ? newest.workflow_id : null,
+        event: typeof newest.event === 'string' && /^[a-z_]{1,32}$/.test(newest.event) ? newest.event : null,
+      },
+      page: {
+        n: runs.length,
+        newest: new Date(times[0]).toISOString(),
+        oldest: new Date(times[times.length - 1]).toISOString(),
+        total,
+      },
+      samples: runs.length,
+      ...(gaps.length ? { medianGapHours: median(gaps), maxGapHours: Math.max(...gaps) } : {}),
+    },
+  };
+}
+
+// The verdict for a listing: the newest run, judged by its first attempt.
+export async function judgeListing(
+  ctx: Ctx, ref: GhRepoRef, listing: RunListing, token: string, timeoutMs = TIMEOUT_MS,
+): Promise<Fetched<RunHistory>> {
+  const newest = listing.newest;
+  const stats = {
+    samples: listing.samples,
+    ...(listing.medianGapHours !== undefined ? { medianGapHours: listing.medianGapHours, maxGapHours: listing.maxGapHours } : {}),
+  };
+  if (!newest) return { ok: true, value: { newest: null, ...stats } };
   // Kept before the re-run swap below: once `conclusion` is replaced by the
   // first attempt's, the listing's own verdict is otherwise lost, and that is
   // the one datum that tells a masked success from a run still failing.
-  const latestConclusion: string | null = newest.conclusion ?? null;
+  const latestConclusion: string | null = newest.conclusion;
   let conclusion: string | null = latestConclusion;
   // Which attempt `conclusion` ends up describing. Assigned inside the branch
   // that chooses it, so a change to the rule cannot leave this out of step.
-  let judgedAttempt: number = newest.run_attempt;
+  let judgedAttempt: number = newest.runAttempt;
   // A re-run does NOT get a new run: GitHub adds an attempt to the same run and
   // the event stays `schedule`. So the listing's conclusion is the re-run's,
   // and a manual re-run that went green would hide the scheduled slot that
   // failed -- the exact masking `event=schedule` was chosen to prevent. Ask for
   // the first attempt, which is the scheduled slot's own outcome.
-  if (newest.run_attempt > 1) {
-    const first = await getJson(ctx, `${API}/repos/${ref.owner}/${ref.repo}/actions/runs/${newest.id}/attempts/1`, token);
-    if (!first.ok) return { ok: false, reason: `first attempt of the newest scheduled run unavailable: ${first.reason}` };
+  if (newest.runAttempt > 1) {
+    const first = await getJson(ctx, `${API}/repos/${ref.owner}/${ref.repo}/actions/runs/${newest.id}/attempts/1`, token, timeoutMs);
+    if (!first.ok) return { ok: false, reason: `first attempt of the newest scheduled run unavailable: ${first.reason}`, ...(first.status !== undefined ? { status: first.status } : {}) };
     // A number or object here would be coerced into "not success" = failure.
     if (!isConclusion(first.value?.conclusion)) return { ok: false, reason: 'unexpected response shape (run attempt)' };
     conclusion = first.value.conclusion ?? null;
@@ -238,19 +297,42 @@ export async function fetchScheduledRuns(ctx: Ctx, ref: GhRepoRef, workflowId: n
   return {
     ok: true,
     value: {
-      newest: { conclusion, createdAt: newest.created_at },
+      newest: { conclusion, createdAt: newest.createdAt },
       // Fields are picked one by one on purpose: `newest` is the raw API entry
       // (typed any), and copying it whole would persist every field GitHub
       // sends -- commit messages, actor logins, URLs -- into state.json.
       judged: {
         runId: newest.id,
         judgedAttempt,
-        latestAttempt: newest.run_attempt,
+        latestAttempt: newest.runAttempt,
         conclusion: safeConclusion(conclusion),
         latestConclusion: safeConclusion(latestConclusion),
       },
-      samples: runs.length,
-      ...(gaps.length ? { medianGapHours: median(gaps), maxGapHours: Math.max(...gaps) } : {}),
+      ...stats,
     },
   };
+}
+
+export async function fetchScheduledRuns(ctx: Ctx, ref: GhRepoRef, workflowId: number, token: string): Promise<Fetched<RunHistory>> {
+  const listed = await listScheduledRuns(ctx, ref, workflowId, token);
+  if (!listed.ok) return listed;
+  return judgeListing(ctx, ref, listed.value, token);
+}
+
+export interface RunProbe { id: number; workflowId: number; event: string; status: string; createdAt: string }
+
+// One run by id: is the freshness baseline still there and still what we
+// recorded? Fields are picked one by one; a 200 that is not a run object is a
+// shape failure, never "gone".
+export async function fetchRun(
+  ctx: Ctx, ref: GhRepoRef, runId: number, token: string, timeoutMs = TIMEOUT_MS,
+): Promise<Fetched<RunProbe>> {
+  const got = await getJson(ctx, `${API}/repos/${ref.owner}/${ref.repo}/actions/runs/${runId}`, token, timeoutMs);
+  if (!got.ok) return got;
+  const r = got.value;
+  if (!isPositiveInt(r?.id) || !isPositiveInt(r?.workflow_id) || typeof r?.event !== 'string'
+      || typeof r?.status !== 'string' || typeof r?.created_at !== 'string' || isNaN(new Date(r.created_at).getTime())) {
+    return { ok: false, reason: 'unexpected response shape (run)' };
+  }
+  return { ok: true, value: { id: r.id, workflowId: r.workflow_id, event: r.event, status: r.status, createdAt: r.created_at } };
 }

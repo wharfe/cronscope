@@ -41,3 +41,21 @@ describe('runIdentityLines', () => {
     expect(line.slice(line.indexOf(' name=') + ' name='.length)).toBe('my repo/.github/workflows/a b.yml');
   });
 });
+
+describe('freshnessLines (wharfe/cronscope#4)', () => {
+  it('prints numbers, times and fixed words only, name last', async () => {
+    const { freshnessLines } = await import('./trace.js');
+    const j = base({
+      lastRun: {
+        status: 'unknown', fetchedAt: '2026-10-03T07:17:05.379Z', undeterminedReason: 'run freshness: listing is older than a run seen before',
+        freshness: { state: 'behind', retries: 2, probe: 'ok', pages: [{ n: 10, newest: '2026-09-17T11:55:17.000Z', oldest: '2026-09-15T00:00:00.000Z', total: 2500 }, { n: 0 }] },
+        lastObserved: { runId: 37089018801, createdAt: '2026-10-03T02:13:07.000Z', status: 'success', confirmedAt: '2026-10-03T06:17:05.212Z' },
+      },
+    });
+    expect(freshnessLines([j], () => 1)).toEqual([
+      '# gha-freshness job=gha|abc123def456 outcome=behind streak=1 retries=2 probe=ok stop=- mark_run=37089018801'
+      + ' mark_created=2026-10-03T02:13:07.000Z pages=10/2026-09-17T11:55:17.000Z/2026-09-15T00:00:00.000Z/2500,0/-/-/- name=proj/.github/workflows/daily.yml',
+    ]);
+    expect(freshnessLines([base({})], () => 0)).toEqual([]);
+  });
+});

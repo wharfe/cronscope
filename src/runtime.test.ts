@@ -16,3 +16,47 @@ describe('runtime glob', () => {
     ]);
   });
 });
+
+describe('anySignal (Node 18 has no AbortSignal.any)', () => {
+  it('aborts when either side aborts', async () => {
+    const { anySignal } = await import('./runtime.js');
+    const a = new AbortController(); const b = new AbortController();
+    const s = anySignal(a.signal, b.signal)!;
+    expect(s.aborted).toBe(false);
+    b.abort();
+    expect(s.aborted).toBe(true);
+    expect(anySignal(undefined, a.signal)).toBe(a.signal);
+  });
+
+  it('the check ctx passes its abort signal into every fetch', async () => {
+    const seen: (AbortSignal | undefined)[] = [];
+    const real = globalThis.fetch;
+    (globalThis as any).fetch = async (_u: string, init: any) => { seen.push(init?.signal); return { ok: true }; };
+    try {
+      const c = new AbortController();
+      const ctx = makeCtx([], c.signal);
+      await ctx.fetch('https://example.invalid', { signal: AbortSignal.timeout(10_000) } as any);
+      c.abort();
+      expect(seen[0]?.aborted).toBe(true);
+    } finally { (globalThis as any).fetch = real; }
+  });
+});
+
+describe('ctx.run under the check abort signal', () => {
+  it('resolves only after the child has closed, even when it ignores SIGTERM', async () => {
+    const c = new AbortController();
+    const ctx = makeCtx([], c.signal);
+    const t0 = Date.now();
+    const pending = ctx.run([process.execPath, '-e', 'process.on("SIGTERM",()=>{}); setTimeout(()=>{}, 800)']);
+    setTimeout(() => c.abort(), 100);
+    const r = await pending;
+    expect(r.code).not.toBe(0);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(700);
+  }, 10_000);
+
+  it('still resolves at once for a command that never started', async () => {
+    const ctx = makeCtx([], new AbortController().signal);
+    const r = await ctx.run(['/nonexistent/cronscope-test-binary']);
+    expect(r.code).not.toBe(0);
+  });
+});

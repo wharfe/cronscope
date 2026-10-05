@@ -1,3 +1,5 @@
+import type { FreshEntry, FreshProposal } from './core/freshness.js';
+
 // Every connector id, as a value: the closed list a connector notice key is
 // checked against (wharfe/cronscope#5).
 export const JOB_SOURCES = ['crontab', 'systemd', 'github-actions', 'cloudflare', 'hermes', 'launchd'] as const;
@@ -41,6 +43,20 @@ export interface LastRun {
     conclusion: string | null;        // GitHub conclusion of the judged attempt (charset-guarded)
     latestConclusion: string | null;  // same for the latest attempt
   };
+  // github-actions only, and only when the listing was compared with a
+  // baseline a check recorded before (wharfe/cronscope#4). `state` is what the
+  // comparison concluded; the rest is numbers, times and fixed words for the
+  // trace line. Absent when there was nothing to compare with.
+  freshness?: {
+    state: 'recovered' | 'behind' | 'rerunning' | 'unverified' | 'deferred' | 'unrechecked';
+    retries: number;                          // list re-fetches made (0-2)
+    probe?: 'not-found' | 'shape' | 'mismatch' | 'http' | 'network' | 'ok';
+    stop?: 401 | 403 | 429;                   // the status that stopped re-fetching in this check
+    pages: { n: number; newest?: string; oldest?: string; total?: number }[];
+  };
+  // The baseline: the newest run a check confirmed before. Past evidence only
+  // -- never the current health, never proof the API told the truth.
+  lastObserved?: { runId: number; createdAt: string; status: RunStatus; confirmedAt: string };
 }
 
 export interface Job {
@@ -85,6 +101,20 @@ export interface Ctx {
   homeDir: string;
   scanRoots: string[];
   timezone?: string;   // IANA tz (e.g. 'Asia/Tokyo'); resolved in runtime, used by the crontab connector
+  // Monotonic milliseconds and a sleep, for the freshness re-fetch budget.
+  // Injected so tests drive time instead of waiting for it.
+  // Set by `check` only: aborted at the deadline or on SIGINT / SIGTERM.
+  abort?: AbortSignal;
+  monoMs?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  // Run-freshness baselines (wharfe/cronscope#4). Absent = the feature is off
+  // for this scan (unsupported state file). `reader` never re-fetches and its
+  // proposals are never saved; only `check` runs as `writer`.
+  freshness?: {
+    mode: 'writer' | 'reader';
+    entries: Record<string, FreshEntry>;
+    proposals: Map<string, FreshProposal>;
+  };
 }
 
 export interface Connector {
