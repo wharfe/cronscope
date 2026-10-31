@@ -73,10 +73,11 @@ async function installConsumer(tgz) {
   const npmHome = await mkdtemp(join(tmpdir(), 'cronscope-npm-home-'));
   const userconfig = join(npmHome, '.npmrc');
   await writeFile(userconfig, '');
-  const env = { ...process.env, HOME: npmHome, npm_config_userconfig: userconfig, npm_config_cache: join(npmHome, 'cache') };
+  const env = { ...process.env };
   for (const k of Object.keys(env)) {
-    if (k.startsWith('CRONSCOPE_') || k.startsWith('NPM_CONFIG_') || ['GITHUB_TOKEN', 'GH_TOKEN', 'NODE_AUTH_TOKEN'].includes(k)) delete env[k];
+    if (k.startsWith('CRONSCOPE_') || k.toLowerCase().startsWith('npm_config_') || ['GITHUB_TOKEN', 'GH_TOKEN', 'NODE_AUTH_TOKEN'].includes(k)) delete env[k];
   }
+  Object.assign(env, { HOME: npmHome, npm_config_userconfig: userconfig, npm_config_cache: join(npmHome, 'cache') });
   const args = [npmCli, 'install', '--omit=dev', '--engine-strict', '--no-audit', '--no-fund', tgz];
   const r = await run(process.execPath, args, { cwd: dir, env }, 300_000);
   if (r.code !== 0) {
@@ -219,6 +220,7 @@ async function checkAbortRun(pkgDir) {
     assert.notEqual(r.code, 0, 'aborted child reported success');
     assert.equal(isAlive(pid), false, `ctx.run resolved while child ${pid} was still alive`);
   } finally {
+    controller.abort(); // also stops a child that started after the pid wait gave up
     if (pid !== undefined && isAlive(pid)) process.kill(pid, 'SIGKILL');
   }
 }
