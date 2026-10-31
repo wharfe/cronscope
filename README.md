@@ -16,6 +16,8 @@ cron も監視対象に含む。
 
 ## インストール / 使い方
 
+動作の下限は Node 18.11。テスト一式は Node 22 と 24 で回し、Node 18.11.0 では配った CLI の起動と状態ファイルを CI で検査している（`scripts/smoke-package.mjs`）。
+
 ```sh
 npx cronscope scan          # 発見して一覧表示（ゼロ設定）
 npx cronscope serve [port]  # localhost ダッシュボード

@@ -27,7 +27,7 @@ async function workflowFiles(cwd: string): Promise<string[]> {
 }
 
 // Either signal aborts the result. Hand-rolled: AbortSignal.any is Node 20.3+
-// and CI still runs Node 18.
+// and engines still promises Node 18.11 (CI checks it via scripts/smoke-package.mjs).
 export function anySignal(a?: AbortSignal, b?: AbortSignal): AbortSignal | undefined {
   if (!a) return b;
   if (!b) return a;
