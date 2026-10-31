@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node: [18, 22]
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -21,3 +21,39 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
+
+  # vitest 4 does not run on Node 18, so the engines floor (>=18.11) is checked
+  # against the packed tarball instead. Build on 22, run on exactly 18.11.0.
+  # Spec: docs/design-debate/vitest4-ci-node/spec.md
+  runtime-compat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - name: Type-check src against Node 18.11 types
+        run: |
+          # --legacy-peer-deps: vitest/vite declare an optional @types/node >=20 peer.
+          npm install --no-save --legacy-peer-deps --no-audit --no-fund @types/node@18.11.0
+          v=$(node -p "require('@types/node/package.json').version")
+          echo "@types/node $v"
+          test "$v" = 18.11.0
+          npx tsc -p tsconfig.json --noEmit
+          git diff --exit-code package.json package-lock.json
+      - name: Pack
+        run: |
+          name=$(npm pack --ignore-scripts --json --pack-destination "$RUNNER_TEMP" | node -e 'let b="";process.stdin.on("data",d=>b+=d);process.stdin.on("end",()=>console.log(JSON.parse(b)[0].filename))')
+          TGZ="$RUNNER_TEMP/$name"
+          test -f "$TGZ"
+          echo "TGZ=$TGZ" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18.11.0
+      - run: node --version
+      - run: node scripts/smoke-package.mjs "$TGZ"
