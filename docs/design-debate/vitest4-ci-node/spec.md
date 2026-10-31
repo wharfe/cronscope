@@ -26,7 +26,7 @@ setup-node の 1 job 内 2 回呼び（採用）。古い Node で配布物を�
    setup-node `18.11.0`（cache なし）→ `node scripts/smoke-package.mjs <tgz 絶対パス>`。
 3. `scripts/smoke-package.mjs`（新規、node: 標準モジュールのみ、配布されない）:
    - 冒頭で `process.version === 'v18.11.0'` を確認。checkout 外の consumer に
-     `npm install --omit=dev --engine-strict --no-audit --no-fund <tgz>`。vitest/typescript/tsx が無いことを確認。失敗時は `npm ls --all` を出す。
+     `npm install --omit=dev --engine-strict --no-audit --no-fund <tgz>`（HOME・userconfig・cache は一時ディレクトリ、トークン系 env は消す）。cron-parser・cronscope・luxon・yaml があり、vitest/typescript/tsx/vite が無いことを確認（完全一致にはしない: 上流の推移依存の追加で赤くしない）。失敗時は `npm ls --all` を出す。
    - fixture: 一時 HOME に `.hermes/cron/jobs.json`（`schedule: {kind:"cron", expr:"0 0 * * *"}`, id `smoke1`）、
      `.config/cronscope/config.json`（`scanRoots` = 一時 repo 1 つ、`.github/workflows/daily.yml` に cron `0 0 * * *`）。
    - CLI は `process.execPath <consumer>/node_modules/cronscope/dist/cli.js <cmd>`、env は HOME・PATH（空ディレクトリ）・TZ=UTC・TMPDIR のみ、cwd は空の一時ディレクトリ、各 30 秒で打ち切り。stdout の文言は判定に使わない。
@@ -36,12 +36,12 @@ setup-node の 1 job 内 2 回呼び（採用）。古い Node で配布物を�
      | パッケージ | consumer に `dist/cli.js`、`bin.cronscope === 'dist/cli.js'` |
      | scan | rc 0、`state.json` の `schemaVersion === 1` |
      | check | rc 0、`state.json`・`notify-state.json`・`gha-freshness.json` が `schemaVersion === 1`、`check.lock` が残らない |
-     | connector | 既知 6 つ（crontab・systemd・github-actions・cloudflare・hermes・launchd）が全部あり、どれにも `thrownBy` が無い（増えても失敗にしない） |
+     | connector | 既知 6 つ（crontab・systemd・github-actions・cloudflare・hermes・launchd）が全部ある（増えても失敗にしない）。snapshot の**全** connector に `thrownBy` が無い（Gate 3 で明確化） |
      | 状態 | `connectors.<name>.state`: hermes=`available`、github-actions=`degraded`、cloudflare=`skipped`、crontab/systemd/launchd=`unavailable` |
      | job | `hermes\|smoke1` の `schedule.kind==='cron'`。github-actions の job 1 つで `schedule.nextRunSource==='computed'`、`schedule.nextRun` が ISO 8601 |
      | 未知のサブコマンド | `nosuch` で rc 2 |
      | 中断の合成 | `globalThis.fetch` をスタブ（受けた signal を記録）に差し替えて**から** consumer の `dist/runtime.js` の `makeCtx([], controller.signal)` を呼ぶ（`realFetch` は makeCtx 内で捕捉: src/runtime.ts:46）。`ctx.fetch(url, {signal: AbortSignal.timeout(60000)})` を 1 回呼ぶ。記録した signal が controller.signal と別物、abort 前は未中断、abort 後は aborted。終わったら fetch を戻す |
-     | 中断の子プロセス | `ctx.run([process.execPath,'-e','setInterval(()=>{},1e3)'])` を 200ms 後に abort、5 秒以内に解決し code≠0（src/runtime.ts:64） |
+     | 中断の子プロセス | 子が pid をファイルに書いて待機する `ctx.run([process.execPath,'-e',…])`。pid が書かれた（起動した）こと・abort 前に未解決であることを確かめてから abort し、5 秒以内に解決・code≠0・解決時点で子の pid が存在しない（ESRCH）。失敗時は子を SIGKILL（Gate 3 で強化。src/runtime.ts:64） |
    - `dist/cli.js` は import しない（末尾で `main()` が走る: src/cli.ts:402）。`node --check` は使わない。
 4. README に 1 文（下限は Node 18.11。テスト一式は 22/24、18.11 は配布 CLI の起動と状態ファイルを CI で検査）。
 5. `docs/specs/2026-10-31-node18-runtime-check.md`: 残すもの／保証しないもの、型の段がグローバル（`AbortSignal.any` 等）を見ないこと、CI 実走後の job 別所要時間。

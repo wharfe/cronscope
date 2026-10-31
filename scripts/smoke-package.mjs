@@ -23,7 +23,8 @@ const EXPECTED_STATE = {
   systemd: 'unavailable',
   launchd: 'unavailable',
 };
-const EXPECTED_PACKAGES = ['cron-parser', 'cronscope', 'luxon', 'yaml'];
+const REQUIRED_PACKAGES = ['cron-parser', 'cronscope', 'luxon', 'yaml'];
+const DEV_ONLY_PACKAGES = ['vitest', '@vitest', 'typescript', 'tsx', 'vite'];
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 
 // Spawn and collect; on timeout SIGKILL the child and report it as a failure.
@@ -67,9 +68,14 @@ async function installConsumer(tgz) {
   // Run npm on this very node so --engine-strict judges against the floor,
   // not whatever `node` PATH would resolve for npm's shebang.
   const npmCli = join(dirname(dirname(process.execPath)), 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js');
-  const env = { ...process.env, npm_config_cache: await mkdtemp(join(tmpdir(), 'cronscope-npm-cache-')) };
+  // Keep PATH and the like, but not the real HOME: no ~/.npmrc (registry,
+  // auth tokens), no ~/.npm cache, no tokens.
+  const npmHome = await mkdtemp(join(tmpdir(), 'cronscope-npm-home-'));
+  const userconfig = join(npmHome, '.npmrc');
+  await writeFile(userconfig, '');
+  const env = { ...process.env, HOME: npmHome, npm_config_userconfig: userconfig, npm_config_cache: join(npmHome, 'cache') };
   for (const k of Object.keys(env)) {
-    if (k.startsWith('CRONSCOPE_') || k === 'GITHUB_TOKEN' || k === 'GH_TOKEN') delete env[k];
+    if (k.startsWith('CRONSCOPE_') || k.startsWith('NPM_CONFIG_') || ['GITHUB_TOKEN', 'GH_TOKEN', 'NODE_AUTH_TOKEN'].includes(k)) delete env[k];
   }
   const args = [npmCli, 'install', '--omit=dev', '--engine-strict', '--no-audit', '--no-fund', tgz];
   const r = await run(process.execPath, args, { cwd: dir, env }, 300_000);
@@ -77,8 +83,11 @@ async function installConsumer(tgz) {
     const ls = await run(process.execPath, [npmCli, 'ls', '--all'], { cwd: dir, env }, 60_000);
     throw new Error(`npm install failed\n${describe(r)}\n--- npm ls --all ---\n${ls.stdout}${ls.stderr}`);
   }
-  const installed = (await readdir(join(dir, 'node_modules'))).filter((n) => !n.startsWith('.')).sort();
-  assert.deepEqual(installed, EXPECTED_PACKAGES, 'consumer must get exactly the runtime dependencies');
+  // Not an exact set: a range-compatible upstream release may add a
+  // transitive dependency, which is not this repo's regression.
+  const installed = (await readdir(join(dir, 'node_modules'))).filter((n) => !n.startsWith('.'));
+  for (const name of REQUIRED_PACKAGES) assert.ok(installed.includes(name), `consumer is missing ${name}`);
+  for (const name of DEV_ONLY_PACKAGES) assert.ok(!installed.includes(name), `consumer got dev-only ${name}`);
   return join(dir, 'node_modules', 'cronscope');
 }
 
@@ -114,10 +123,13 @@ function runCli(pkgDir, fx, args) {
 
 function checkSnapshot(snap, label) {
   assert.equal(snap.schemaVersion, 1, `${label}: state.json schemaVersion`);
+  // Every connector, including ones added later: a throw is a failure.
+  for (const [name, c] of Object.entries(snap.connectors ?? {})) {
+    assert.equal(c.thrownBy, undefined, `${label}: connector ${name} threw (${c.thrownBy}: ${c.reason})`);
+  }
   for (const name of KNOWN_CONNECTORS) {
     const c = snap.connectors?.[name];
     assert.ok(c, `${label}: connector ${name} missing`);
-    assert.equal(c.thrownBy, undefined, `${label}: connector ${name} threw (${c.thrownBy}: ${c.reason})`);
     assert.equal(c.state, EXPECTED_STATE[name], `${label}: connector ${name} state (reason: ${c.reason})`);
   }
   const hermes = snap.jobs.find((j) => j.id === 'hermes|smoke1');
@@ -180,20 +192,39 @@ async function checkAbortCompose(pkgDir) {
   }
 }
 
-// ctx.run under an abort kills the child and waits for its close.
+// ctx.run under an abort kills the child and resolves only after it closed.
+// The child records its pid, so the check can tell "started, then stopped"
+// apart from "never started" and from "resolved while the child still lives".
 async function checkAbortRun(pkgDir) {
   const { makeCtx } = await import(pathToFileURL(join(pkgDir, 'dist', 'runtime.js')).href);
+  const pidFile = join(await mkdtemp(join(tmpdir(), 'cronscope-abort-')), 'pid');
   const controller = new AbortController();
   const ctx = makeCtx([], controller.signal);
-  setTimeout(() => controller.abort(), 200);
-  let timer;
-  const deadline = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('ctx.run did not settle within 5s of abort')), 5_200); });
+  const script = `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1e3);`;
+  let settled = false;
+  const p = ctx.run([process.execPath, '-e', script]).finally(() => { settled = true; });
+  let pid;
   try {
-    const r = await Promise.race([ctx.run([process.execPath, '-e', 'setInterval(()=>{},1e3)']), deadline]);
+    for (let waited = 0; pid === undefined; waited += 50) {
+      if (waited >= 5_000) throw new Error('child never started (no pid file within 5s)');
+      if (settled) throw new Error(`ctx.run settled before the child started: ${JSON.stringify(await p)}`);
+      await new Promise((r) => setTimeout(r, 50));
+      try { pid = Number(await readFile(pidFile, 'utf8')) || undefined; } catch { /* not yet */ }
+    }
+    assert.equal(settled, false, 'ctx.run settled before abort');
+    controller.abort();
+    let timer;
+    const deadline = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('ctx.run did not settle within 5s of abort')), 5_000); });
+    const r = await Promise.race([p, deadline]).finally(() => clearTimeout(timer));
     assert.notEqual(r.code, 0, 'aborted child reported success');
+    assert.equal(isAlive(pid), false, `ctx.run resolved while child ${pid} was still alive`);
   } finally {
-    clearTimeout(timer);
+    if (pid !== undefined && isAlive(pid)) process.kill(pid, 'SIGKILL');
   }
+}
+
+function isAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code !== 'ESRCH'; }
 }
 
 async function main() {
