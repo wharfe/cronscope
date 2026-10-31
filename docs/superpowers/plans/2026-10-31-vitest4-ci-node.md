@@ -64,7 +64,7 @@
 - [ ] **Step 4: 赤の確認**（各々実行後に元へ戻す。コミットしない）
   - 4a. Node 22 で実行 → rc 1、runtime の失敗。
   - 4b. 親に `GITHUB_TOKEN=dummy CRONSCOPE_SLACK_WEBHOOK_URL=http://127.0.0.1:9/hook` を付けて実行 → **rc 0**（隔離が効いている証拠）。続けて env 置き換えを一時的に `{...process.env, ...}` に変え、同じ 2 つを明示して実行 → rc 1（github-actions が `available` になる／Slack 送信が接続拒否）。CF のダミーは使わない（api.cloudflare.com へ通信してしまう）。どちらも外部ネットワークに出ない。漏れ版が rc 0 なら判定を見直す。
-  - 4c. consumer の dist の `runtime.js` の `anySignal` で、`if (!b) return a;` より後ろだけを `return AbortSignal.any([a, b]);` に書き換えて実行 → rc 1（Node 18.11 に AbortSignal.any が無い）。
+  - 4c. repo の `dist/runtime.js` の `export function anySignal` 本体で、`if (!b)` / `return a;`（tsc 出力では 2 行）より後ろだけを `return AbortSignal.any([a, b]);` に書き換え、pack し直して実行 → rc 1（Node 18.11 に AbortSignal.any が無い）。終わったら `npm run build` で戻す（consumer は毎回 tgz から作り直されるので consumer 側は書き換えられない）。
   - 4d. fixture の hermes の schedule を文字列にして実行 → rc 1（`schedule.kind` が `interval`）。
 - [ ] **Step 5: Commit** `test(ci): Node 18.11.0 で配布 tarball を検査する smoke を足す`。
 
